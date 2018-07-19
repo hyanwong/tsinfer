@@ -968,7 +968,7 @@ class SampleData(DataContainer):
             number of samples added that refer to this individual. Defaults to 1
             (haploid).
         :param dict metadata: A JSON encodable dict-like object containing
-            metadata that is to be associated with this population.
+            metadata that is to be associated with this individual.
         :param int population: The ID of the population to assoicate with this
             individual (or more precisely, with the samples for this individual).
             If not specified or None, defaults to the null population (-1).
@@ -1334,6 +1334,18 @@ class AncestorData(DataContainer):
     @property
     def ancestors_haplotype(self):
         return self.data["ancestors/haplotype"]
+
+    @property
+    def ancestors_length(self):
+        """
+        Returns the length of ancestors in physical coordinates.
+        """
+        # Ancestor start and end are half-closed. The last site is assumed
+        # to cover the region up to sequence length.
+        pos = np.hstack([self.sites_position[:], [self.sequence_length]])
+        start = self.ancestors_start[:]
+        end = self.ancestors_end[:]
+        return pos[end] - pos[start]
 
     ####################################
     # Write mode

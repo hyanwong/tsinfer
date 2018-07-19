@@ -2,34 +2,39 @@
 Script for statistically evaluating various aspects of tsinfer performance.
 """
 import argparse
-import sys
-import collections
 import random
 import concurrent.futures
 import time
 import warnings
 import os.path
-import colorsys
 import json
+import logging
 
 import numpy as np
 import pandas as pd
 import matplotlib as mp
 # Force matplotlib to not use any Xwindows backend.
-mp.use('Agg')
+mp.use('Agg')  # NOQA
 import matplotlib.pyplot as plt
-import matplotlib.backends.backend_pdf
 from matplotlib import collections as mc
 import seaborn as sns
 import tqdm
-import scipy.stats
-import colorutils
+import daiquiri
 
 import msprime
-
-
 import tsinfer
 import tsinfer.cli as cli
+
+
+# Set by the CLI.
+global _output_format
+_output_format = None
+
+
+def save_figure(basename):
+    plt.savefig(basename + "." + _output_format)
+    plt.clf()
+
 
 def make_errors(v, p):
     """
@@ -68,397 +73,10 @@ def generate_samples(ts, error_p):
     return G
 
 
-def infer_from_simulation(
-        ts, recombination_rate=1, input_error=0, sample_error=0, engine="C",
-        path_compression=True):
-    if input_error == 0:
-        genotypes = ts.genotype_matrix()
-    else:
-        genotypes = generate_samples(ts, input_error)
-    positions = [mut.position for mut in ts.mutations()]
-    return tsinfer.infer(
-        genotypes, positions=positions, sequence_length=ts.sequence_length,
-        recombination_rate=recombination_rate, sample_error=sample_error,
-        engine=engine, path_compression=path_compression)
-
-
-def get_mean_rf_distance(ts1, ts2):
-    """
-    Returns the mean distance between the trees in the specified tree sequences.
-    """
-    assert ts1.sample_size == ts2.sample_size
-    assert ts1.sequence_length == ts2.sequence_length
-    trees1 = []
-    intervals1 = []
-    trees2 = []
-    intervals2 = []
-    tns = dendropy.TaxonNamespace()
-    for t in ts1.trees():
-        dt = dendropy.Tree.get(data=t.newick(), schema="newick", taxon_namespace=tns)
-        trees1.append(dt)
-        intervals1.append(t.interval)
-    assert len(trees1) == ts1.num_trees
-    for t in ts2.trees():
-        dt = dendropy.Tree.get(data=t.newick(), schema="newick", taxon_namespace=tns)
-        trees2.append(dt)
-        intervals2.append(t.interval)
-    assert len(trees2) == ts2.num_trees
-    j1 = 0
-    j2 = 0
-    total_distance = 0
-    total_metric = 0
-    # I haven't tested this algorithm thoroughly, so there might be corner cases
-    # not handled correctly. However, the total_distance assert below should
-    # catch the problem if it occurs.
-    while j1 < len(trees1) and j2 < len(trees2):
-        # Each iteration of this loop considers one overlapping interval and
-        # increments the counters.
-        l1, r1 = intervals1[j1]
-        l2, r2 = intervals2[j2]
-        l = max(l1, l2)
-        r = min(r1, r2)
-        rf_distance = dendropy.calculate.treecompare.symmetric_difference(
-                trees1[j1], trees2[j2])
-        total_metric += rf_distance * (r - l)
-        total_distance += r - l
-        if r1 <= r2:
-            j1 += 1
-        if r1 >= r2:
-            j2 += 1
-    # assert total_distance, ts1.sequence_length)
-    return total_metric / total_distance
-
-
-def check_basic_performance():
-    # Basic check to ensure that we get the same results regardless of the recombination
-    # rate
-
-    num_samples = 10
-    MB = 10**6
-    sites = []
-    trees = []
-    edges = []
-    nodes = []
-    rf_distance = []
-    recombination_rate = []
-    for seed in range(1, 10):
-        ts_source = msprime.simulate(
-            num_samples, length=1*MB, Ne=10**4, recombination_rate=1e-8, mutation_rate=1e-8,
-            random_seed=seed)
-        print("sim: n = ",
-                ts_source.num_samples, ", m =", ts_source.num_sites,
-                "num_trees = ", ts_source.num_trees)
-        for exponent in range(0, 6):
-            infer_recomb_rate = 10**(-exponent)
-            ts_inferred = infer_from_simulation(
-                ts_source, recombination_rate=infer_recomb_rate, sample_error=0)
-            recombination_rate.append(infer_recomb_rate)
-            rf = get_mean_rf_distance(ts_source, ts_inferred)
-            rf_distance.append(get_mean_rf_distance(ts_source, ts_inferred))
-            sites.append(ts_source.num_sites)
-            trees.append(ts_inferred.num_trees / ts_source.num_trees)
-            nodes.append(ts_inferred.num_nodes / ts_source.num_nodes)
-            edges.append(ts_inferred.num_edges / ts_source.num_edges)
-
-            # print("recombination_rate = ", recombination_rate)
-            # print("mean rf = ", rf)
-            # print("num_trees = ", ts_inferred.num_trees / ts_source.num_trees)
-            # print("num_edges= ", ts_inferred.num_edges/ ts_source.num_edges)
-    df = pd.DataFrame(data={
-        "num_samples": num_samples,
-        "recombination_rate": recombination_rate,
-        "sites": sites,
-        "trees": trees,
-        "edges": edges,
-        "nodes": nodes,
-        "rf_distance": rf_distance})
-    for y_value in ["trees", "nodes", "edges", "rf_distance"]:
-        plt.figure()
-        plot = sns.boxplot(x=df["recombination_rate"], y=df[y_value])
-        plt.savefig("tmp__NOBACKUP__/{}.png".format(y_value))
-
-
-def check_effect_error_param(input_error=0.0):
-    num_samples = 10
-    MB = 10**6
-    sites = []
-    trees = []
-    edges = []
-    nodes = []
-    rf_distance = []
-    error = []
-    for seed in range(1, 10):
-        ts_source = msprime.simulate(
-            num_samples, length=1*MB, Ne=10**4, recombination_rate=1e-8, mutation_rate=1e-8,
-            random_seed=seed)
-        print("sim: n = ",
-                ts_source.num_samples, ", m =", ts_source.num_sites,
-                "num_trees = ", ts_source.num_trees)
-        for err in [0] + list(10.0**-np.arange(1, 5)):
-            ts_inferred = infer_from_simulation(
-                ts_source, recombination_rate=1, input_error=input_error, sample_error=err)
-            error.append(err)
-            rf = get_mean_rf_distance(ts_source, ts_inferred)
-            rf_distance.append(get_mean_rf_distance(ts_source, ts_inferred))
-            sites.append(ts_source.num_sites)
-            trees.append(ts_inferred.num_trees / ts_source.num_trees)
-            nodes.append(ts_inferred.num_nodes / ts_source.num_nodes)
-            edges.append(ts_inferred.num_edges / ts_source.num_edges)
-        df = pd.DataFrame(data={
-            "num_samples": num_samples,
-            "error": error,
-            "sites": sites,
-            "trees": trees,
-            "edges": edges,
-            "nodes": nodes,
-            "rf_distance": rf_distance})
-        df.to_csv("tmp__NOBACKUP__/error_{}.csv".format(input_error))
-        # df = pd.read_csv("tmp__NOBACKUP__/error_{}.csv".format(input_error))
-        plt.figure()
-        fig, axs = plt.subplots(nrows=2, ncols=2)
-        for j, y_value in enumerate(["trees", "nodes", "edges", "rf_distance"]):
-            sns.boxplot(x=df["error"], y=df[y_value], ax=axs[j // 2, j % 2])
-        plt.suptitle("input_error = {}".format(input_error))
-        plt.savefig("tmp__NOBACKUP__/error_{}.png".format(input_error))
-        plt.clf()
-
-
-def check_variable_recomb():
-    rate = 1e-10
-    Mb = 10**6
-    num_samples = 20
-    seed = 10
-    recomb_map = msprime.RecombinationMap(
-        positions=[0, 1*Mb, 1.1 * Mb, 2 * Mb],
-        rates = [rate, 100 * rate, rate, 0], num_loci=10000)
-    sites = []
-    trees = []
-    edges = []
-    nodes = []
-    rf_distance = []
-    flat_rate = []
-    for seed in range(1, 100):
-        ts_source = msprime.simulate(
-            num_samples, recombination_map=recomb_map, Ne=10**4, mutation_rate=1e-8,
-            random_seed=seed,)
-        print(
-            "sim: n = ", ts_source.num_samples, ", m =", ts_source.num_sites,
-            "num_trees = ", ts_source.num_trees)
-        samples = np.zeros((ts_source.num_samples, ts_source.num_sites), dtype=np.int8)
-        for variant in ts_source.variants():
-            samples[:, variant.index] = variant.genotypes
-        positions = np.array([site.position for site in ts_source.sites()])
-        genetic_positions = np.array([
-            recomb_map.physical_to_genetic(x) for x in positions])
-        recombination_rate = np.zeros(ts_source.num_sites)
-        recombination_rate[1:] = genetic_positions[1:] - genetic_positions[:-1]
-        recombination_rate /= recomb_map.get_num_loci()
-
-        for recomb_rate in [1, recombination_rate]:
-            ts_inferred = tsinfer.infer(
-                samples=samples, positions=positions,
-                sequence_length=ts_source.sequence_length,
-                recombination_rate=recomb_rate, sample_error=0)
-            rf = get_mean_rf_distance(ts_source, ts_inferred)
-            rf_distance.append(get_mean_rf_distance(ts_source, ts_inferred))
-            flat_rate.append(recomb_rate is 1)
-            sites.append(ts_source.num_sites)
-            trees.append(ts_inferred.num_trees / ts_source.num_trees)
-            nodes.append(ts_inferred.num_nodes / ts_source.num_nodes)
-            edges.append(ts_inferred.num_edges / ts_source.num_edges)
-        df = pd.DataFrame(data={
-            "num_samples": num_samples,
-            "sites": sites,
-            "trees": trees,
-            "edges": edges,
-            "nodes": nodes,
-            "rf_distance": rf_distance,
-            "flat_rate": flat_rate})
-            # df.to_csv("tmp__NOBACKUP__/error_{}.csv".format(input_error))
-    plt.figure()
-    fig, axs = plt.subplots(nrows=2, ncols=2)
-    for j, y_value in enumerate(["trees", "nodes", "edges", "rf_distance"]):
-        sns.boxplot(x=df["flat_rate"], y=df[y_value], ax=axs[j // 2, j % 2])
-    plt.suptitle("variable recomb")
-    plt.savefig("tmp__NOBACKUP__/variable_recomb.png")
-    plt.clf()
-
-    # print(ts_source.num_sites)
-    # print(ts_source.num_trees)
-    # for t in ts_source.trees():
-    #     print(t.interval[1] - t.interval[0])
-
-
-# TODO these are really unit tests. Move them into the tests directory.
-def check_single_tree_one_mutation_per_branch():
-    for num_samples in [4]:
-        num_samples = 10
-        for seed in range(1, 10):
-            ts_source = msprime.simulate(num_samples, length=2 * num_samples, random_seed=seed)
-            # Put a mutation on every branch.
-            t = ts_source.dump_tables()
-            for u in range(ts_source.num_nodes - 1):
-                t.sites.add_row(position=u, ancestral_state="0")
-                t.mutations.add_row(site=u, node=u, derived_state="1")
-            ts_source = msprime.load_tables(**t.asdict())
-            ts_inferred = infer_from_simulation(ts_source)
-            assert ts_inferred.num_trees == 1
-
-
-def verify_trees_equal(ts_source, ts_inferred):
-    """
-    Verifies that the inferred trees are topologically equal to the specified
-    inferred trees.
-    """
-    for t in ts_source.trees():
-        print(t.interval)
-        print(t.draw(format="unicode"))
-    print("++")
-    for t in ts_inferred.trees():
-        print(t.interval)
-        print(t.draw(format="unicode"))
-
-    print("==")
-
-
-# TODO these are really unit tests. Move them into the tests directory.
-def check_many_trees_one_mutation_per_branch():
-    # for num_samples in [10, 100, 1000, 10000]:
-
-    import daiquiri
-    daiquiri.setup(level="DEBUG", outputs=(daiquiri.output.Stream(sys.stdout),))
-    num_samples = 4
-    print("num_samples = ", num_samples)
-    # for seed in range(1, 1000):
-    for seed in [19]:
-        print(seed)
-        recombination_map = msprime.RecombinationMap.uniform_map(
-                100, 0.002, num_loci=100)
-        ts_source = msprime.simulate(
-                num_samples, recombination_map=recombination_map,
-                random_seed=seed, model="smc_prime")
-        # Put a mutation on every branch.
-        tables = ts_source.dump_tables()
-        j = 0
-        for tree in ts_source.trees():
-            left, right = tree.interval
-            n = len(list(tree.nodes()))
-            delta = (right - left) / n
-            x = left
-            for u in tree.nodes():
-                if u != tree.root:
-                    tables.sites.add_row(position=x, ancestral_state="0")
-                    tables.mutations.add_row(site=j, node=u, derived_state="1")
-                    j += 1
-                    x += delta
-        print(tables)
-        ts_source = msprime.load_tables(**tables.asdict())
-        print("samples")
-        print(ts_source.genotype_matrix().T)
-        ts_inferred = infer_from_simulation(ts_source,
-                path_compression=False,
-                # engine="Py-matrix")
-                engine="P")
-        print("num_trees", ts_source.num_trees, ts_inferred.num_trees)
-        print("num_edges", ts_source.num_edges, ts_inferred.num_edges)
-        verify_trees_equal(ts_source, ts_inferred)
-        print(ts_inferred.tables)
-        assert ts_source.num_trees >= ts_inferred.num_trees
-        assert ts_source.num_edges >= ts_inferred.num_edges
-
-
-# TODO these are really unit tests. Move them into the tests directory.
-def check_single_tree_one_mutation_per_branch():
-    for num_samples in [10, 100]:
-        print("num_samples = ", num_samples)
-        for seed in range(1, 10):
-            ts_source = msprime.simulate(num_samples, length=2 * num_samples, random_seed=seed)
-            # Put a mutation on every branch.
-            t = ts_source.dump_tables()
-            for u in range(ts_source.num_nodes - 1):
-                t.sites.add_row(position=u, ancestral_state="0")
-                t.mutations.add_row(site=u, node=u, derived_state="1")
-            ts_source = msprime.load_tables(**t.asdict())
-            ts_inferred = infer_from_simulation(ts_source)
-            assert ts_inferred.num_trees == 1
-
-def check_single_tree_two_mutations_per_branch():
-    for num_samples in [10, 100]:
-        print("num_samples = ", num_samples)
-        num_mutations = 2 * num_samples * 2
-        d = 1 / num_mutations
-        for seed in range(1, 10):
-            ts_source = msprime.simulate(num_samples, length=num_mutations, random_seed=seed)
-            # Put a mutation on every branch.
-            t = ts_source.dump_tables()
-            j = 0
-            for u in range(ts_source.num_nodes - 1):
-                for _ in range(2):
-                    t.sites.add_row(position=j * d, ancestral_state="0")
-                    t.mutations.add_row(site=j, node=u, derived_state="1")
-                    j += 1
-            ts_source = msprime.load_tables(**t.asdict())
-            ts_inferred = infer_from_simulation(ts_source)
-            assert ts_inferred.num_trees == 1
-
-def check_single_tree_many_mutations_per_branch():
-    num_samples = 10
-    for k in range(2, 20):
-        print("k = ", k)
-        num_mutations = 2 * num_samples * k
-        d = 1 / num_mutations
-        for seed in range(1, 10):
-            ts_source = msprime.simulate(num_samples, length=num_mutations, random_seed=seed)
-            # Put a mutation on every branch.
-            t = ts_source.dump_tables()
-            j = 0
-            for u in range(ts_source.num_nodes - 1):
-                for _ in range(k):
-                    t.sites.add_row(position=j * d, ancestral_state="0")
-                    t.mutations.add_row(site=j, node=u, derived_state="1")
-                    j += 1
-            ts_source = msprime.load_tables(**t.asdict())
-            # print(ts_source.tables)
-            ts_inferred = infer_from_simulation(ts_source)
-            assert ts_inferred.num_trees == 1
-
-
-def check_single_tree_high_mutation_rate():
-    # import daiquiri
-    # daiquiri.setup(level="DEBUG")
-    # TODO change this test so that we throw a Poisson number of mutations on
-    # each branch. It's very hard to have mutations on _every_ branch for larger
-    # tree sizes.
-    for num_samples in [3, 10, 50]:
-        for seed in range(1, 10):
-            ts_source = msprime.simulate(num_samples, random_seed=seed, mutation_rate=5000)
-            print("sim = ", num_samples, ts_source.num_sites, seed)
-            nodes = set()
-            for site in ts_source.sites():
-                for mutation in site.mutations:
-                    nodes.add(mutation.node)
-            # if nodes != set(range(ts_source.num_nodes - 1)):
-            #     continue
-            assert nodes == set(range(ts_source.num_nodes - 1))
-            ts_inferred = infer_from_simulation(ts_source)
-            # for t in ts_source.trees():
-            #     print(t.draw(format="unicode"))
-            # print(ts_inferred.num_trees)
-            # for t in ts_inferred.trees():
-            #     print(t.draw(format="unicode"))
-            assert ts_inferred.num_trees == 1
-
-
-##############################
-# Updated code to work with the CLI
-##############################
-
-
-def run_infer(ts, engine="C", path_compression=True, exact_ancestors=False):
+def run_infer(ts, engine=tsinfer.C_ENGINE, path_compression=True, exact_ancestors=False):
     """
     Runs the perfect inference process on the specified tree sequence.
     """
-
     sample_data = tsinfer.SampleData.from_tree_sequence(ts)
 
     if exact_ancestors:
@@ -475,6 +93,7 @@ def run_infer(ts, engine="C", path_compression=True, exact_ancestors=False):
         sample_data, ancestors_ts, path_compression=path_compression,
         engine=engine)
     return inferred_ts
+
 
 def edges_performance_worker(args):
     simulation_args, tree_metrics = args
@@ -590,7 +209,7 @@ def run_edges_performance(args):
 
     name_format = os.path.join(
         args.destination_dir,
-        "ancestors_n={}_L={}_mu={}_rho={}_{{}}.png".format(
+        "ancestors_n={}_L={}_mu={}_rho={}_{{}}".format(
             args.sample_size, args.length, args.mutation_rate, args.recombination_rate))
 
     plt.plot(
@@ -605,8 +224,7 @@ def run_edges_performance(args):
     plt.ylabel("inferred # edges / source # edges")
     plt.xlabel("Num sites")
     plt.legend()
-    plt.savefig(name_format.format("edges"))
-    plt.clf()
+    save_figure(name_format.format("edges"))
 
     plt.plot(
         dfg.num_sites, dfg.estimated_anc_mean_children,
@@ -629,10 +247,8 @@ def run_edges_performance(args):
     plt.ylabel("num_children")
     plt.xlabel("Num sites")
     plt.legend()
-    plt.savefig(name_format.format("num_children"))
+    save_figure(name_format.format("num_children"))
     plt.clf()
-
-
 
     if args.compute_tree_metrics:
         plt.plot(
@@ -647,7 +263,7 @@ def run_edges_performance(args):
         plt.ylabel("Distance weighted KC metric")
         plt.xlabel("Num sites")
         plt.legend()
-        plt.savefig(name_format.format("kc_distance_weighted"))
+        save_figure(name_format.format("kc_distance_weighted"))
         plt.clf()
 
         plt.plot(
@@ -662,7 +278,7 @@ def run_edges_performance(args):
         plt.ylabel("Mean KC metric")
         plt.xlabel("Num sites")
         plt.legend()
-        plt.savefig(name_format.format("kc_mean"))
+        save_figure(name_format.format("kc_mean"))
         plt.clf()
 
         plt.plot(
@@ -677,92 +293,8 @@ def run_edges_performance(args):
         plt.ylabel("Mean KC metric")
         plt.xlabel("Num sites")
         plt.legend()
-        plt.savefig(name_format.format("perfect_trees"))
+        save_figure(name_format.format("perfect_trees"))
         plt.clf()
-
-
-def get_num_sample_edges(ts):
-    """
-    Returns the number of edges where the child is a sample.
-    """
-    count = 0
-    for e in ts.edges():
-        node = ts.node(e.child)
-        count += node.is_sample()
-    return count
-
-
-def effective_recombination_worker(args):
-    simulation_args = args
-    smc_ts = msprime.simulate(**simulation_args)
-    estimated_ancestors_ts = run_infer(smc_ts, exact_ancestors=False)
-    exact_ancestors_ts = run_infer(smc_ts, exact_ancestors=True)
-    results = {
-        "num_sites": smc_ts.num_sites,
-        "source_num_trees": smc_ts.num_trees,
-        "source_sample_edges": get_num_sample_edges(smc_ts),
-        "estimated_anc_sample_edges": get_num_sample_edges(estimated_ancestors_ts),
-        "exact_anc_sample_edges": get_num_sample_edges(exact_ancestors_ts),
-    }
-    results.update(simulation_args)
-    return results
-
-
-def run_effective_recombination(args):
-    num_sample_sizes = 10
-    MB = 10**6
-
-    work = []
-    rng = random.Random()
-    if args.random_seed is not None:
-        rng.seed(args.random_seed)
-    for n in np.linspace(0, args.sample_size, num_sample_sizes + 1)[1:].astype(int):
-        for _ in range(args.num_replicates):
-            sim_args = {
-                "sample_size": n,
-                "length": args.length * MB,
-                "recombination_rate": args.recombination_rate,
-                "mutation_rate": args.mutation_rate,
-                "Ne": 10**4,
-                "model": "smc_prime",
-                "random_seed": rng.randint(1, 2**30)}
-            work.append(sim_args)
-
-    random.shuffle(work)
-    progress = tqdm.tqdm(total=len(work), disable=not args.progress)
-    results = []
-    try:
-        with concurrent.futures.ProcessPoolExecutor(args.num_processes) as executor:
-            for result in executor.map(effective_recombination_worker, work):
-                results.append(result)
-                progress.update()
-
-    except KeyboardInterrupt:
-        pass
-    progress.close()
-
-    df = pd.DataFrame(results)
-    df.length /= MB
-    df.source_sample_edges -= df.sample_size
-    df.estimated_anc_sample_edges -= df.sample_size
-    df.exact_anc_sample_edges -= df.sample_size
-
-    dfg = df.groupby(df.sample_size).mean()
-    print(dfg)
-
-    name_format = os.path.join(
-        args.destination_dir,
-        "effective_recombination_n={}_L={}_mu={}_rho={}_{{}}.png".format(
-            args.sample_size, args.length, args.mutation_rate, args.recombination_rate))
-
-    plt.plot(dfg.source_sample_edges, label="source")
-    plt.plot(dfg.estimated_anc_sample_edges, label="estimated ancestors")
-    plt.plot(dfg.exact_anc_sample_edges, label="exact ancestors")
-    plt.ylabel("Number of sample edges - n")
-    plt.xlabel("Sample size")
-    plt.legend()
-    plt.savefig(name_format.format("sample_edges"))
-    plt.clf()
 
 
 def unrank(samples, n):
@@ -794,9 +326,7 @@ def edge_plot(ts, filename):
     fig, ax = plt.subplots()
     ax.add_collection(lc)
     ax.autoscale()
-    plt.savefig(filename)
-    plt.clf()
-
+    save_figure(filename)
 
 
 def run_hotspot_analysis(args):
@@ -845,10 +375,11 @@ def run_hotspot_analysis(args):
 
         name_format = os.path.join(
             args.destination_dir,
-            "hotspots_n={}_L={}_mu={}_rho={}_N={}_I={}_W={}_{{}}.png".format(
-                args.sample_size, args.length, args.mutation_rate, args.recombination_rate,
-                args.num_hotspots, args.hotspot_intensity, args.hotspot_width))
-        plt.savefig(name_format.format("breakpoints_density={}".format(density)))
+            "hotspots_n={}_L={}_mu={}_rho={}_N={}_I={}_W={}_{{}}".format(
+                args.sample_size, args.length, args.mutation_rate,
+                args.recombination_rate, args.num_hotspots, args.hotspot_intensity,
+                args.hotspot_width))
+        save_figure(name_format.format("breakpoints_density={}".format(density)))
         plt.clf()
 
     print("Generating edge plots")
@@ -857,120 +388,21 @@ def run_hotspot_analysis(args):
     edge_plot(inferred_ts, name_format.format("dest_edges"))
 
 
-def error_analysis_worker(args):
-    simulation_args, input_error, inference_error = args
-    before = time.perf_counter()
-    ts = msprime.simulate(**simulation_args)
-
-    # V = generate_samples(ts, input_error)
-    ts = tsinfer.insert_errors(ts, inference_error)
-    V = ts.genotype_matrix()
-    inferred_ts = tsinfer.infer(
-        V, [site.position for site in ts.sites()], sample_error=0,
-        sequence_length=ts.sequence_length,
-        recombination_rate=simulation_args["recombination_rate"])
-
-    results = {
-        "input_error": input_error,
-        "inference_error": inference_error,
-        "num_sites": ts.num_sites,
-        "source_num_trees": ts.num_trees,
-        "inferred_num_trees": inferred_ts.num_trees,
-        "source_edges": ts.num_edges,
-        "inferred_edges": inferred_ts.num_edges,
-    }
-    results.update(simulation_args)
-
-    breakpoints, kc_distance = tsinfer.compare(ts, inferred_ts)
-    d = breakpoints[1:] - breakpoints[:-1]
-    d /= breakpoints[-1]
-    kc_distance_weighted = np.sum(kc_distance * d)
-    kc_mean = np.mean(kc_distance)
-    results.update({
-        "kc_distance_weighted": kc_distance_weighted,
-        "kc_mean": kc_mean,
-    })
-    return results
-
-
-def run_error_analysis(args):
-    MB = 10**6
-    L = args.length * MB
-
-    work = []
-    rng = random.Random()
-    if args.random_seed is not None:
-        rng.seed(args.random_seed)
-    inference_errors = [
-        0, args.error_probability / 10, args.error_probability,
-        args.error_probability * 10]
-    for e in inference_errors:
-        for _ in range(args.num_replicates):
-            sim_args = {
-                "sample_size": args.sample_size,
-                "length": L,
-                "recombination_rate": args.recombination_rate,
-                "mutation_rate": args.mutation_rate,
-                "Ne": 10**4,
-                "random_seed": rng.randint(1, 2**30)}
-            work.append((sim_args, args.error_probability, e))
-
-    random.shuffle(work)
-    progress = tqdm.tqdm(total=len(work), disable=not args.progress)
-    results = []
-    try:
-        with concurrent.futures.ProcessPoolExecutor(args.num_processes) as executor:
-            for result in executor.map(error_analysis_worker, work):
-                results.append(result)
-                progress.update()
-
-    except KeyboardInterrupt:
-        pass
-    progress.close()
-
-    df = pd.DataFrame(results)
-
-    name_format = os.path.join(
-        args.destination_dir,
-        "error_n={}_L={}_mu={}_rho={}_e={}_{{}}.png".format(
-            args.sample_size, args.length, args.mutation_rate,
-            args.recombination_rate, args.error_probability))
-
-    sns.boxplot(x="inference_error", y="kc_mean", data=df)
-    plt.ylabel("KC distance")
-    plt.xlabel("Error parameter")
-    plt.savefig(name_format.format("kc"))
-    plt.clf()
-
-    # plt.plot(dfg.inferred_edges / dfg.source_edges)
-    # plt.axvline(args.error_probability, ls="--")
-    # plt.ylabel("inferred # edges / source # edges")
-    # plt.xlabel("Error parameter")
-    # plt.savefig(name_format.format("edges"))
-    # plt.clf()
-
-    # plt.plot(dfg.kc_mean)
-    # plt.axvline(args.error_probability, ls="--")
-    # plt.ylabel("KC distance")
-    # plt.xlabel("Error parameter")
-    # plt.savefig(name_format.format("kc"))
-    # plt.clf()
-
-
-
 def ancestor_properties_worker(args):
     simulation_args, compute_exact = args
     ts = msprime.simulate(**simulation_args)
 
     sample_data = tsinfer.SampleData.from_tree_sequence(ts)
     estimated_anc = tsinfer.generate_ancestors(sample_data)
-    estimated_anc_length = estimated_anc.ancestors_end[:] - estimated_anc.ancestors_start[:]
-    focal_sites = estimated_anc.focal_sites[:]
+    # Show lengths as a fraction of the total.
+    estimated_anc_length = estimated_anc.ancestors_length / ts.sequence_length
+    focal_sites = estimated_anc.ancestors_focal_sites[:]
     estimated_anc_focal_distance = np.zeros(estimated_anc.num_ancestors)
+    pos = np.hstack([estimated_anc.sites_position[:] / ts.sequence_length] + [1])
     for j in range(estimated_anc.num_ancestors):
         focal = focal_sites[j]
         if len(focal) > 0:
-            estimated_anc_focal_distance[j] = focal[-1] - focal[0]
+            estimated_anc_focal_distance[j] = pos[focal[-1]] - pos[focal[0]]
 
     results = {
         "num_sites": ts.num_sites,
@@ -984,14 +416,16 @@ def ancestor_properties_worker(args):
         exact_anc = tsinfer.AncestorData(sample_data)
         tsinfer.build_simulated_ancestors(sample_data, exact_anc, ts)
         exact_anc.finalise()
+        # Show lengths as a fraction of the total.
         exact_anc_length = exact_anc.ancestors_end[:] - exact_anc.ancestors_start[:]
 
-        focal_sites = exact_anc.focal_sites[:]
+        focal_sites = exact_anc.ancestors_focal_sites[:]
+        pos = np.hstack([exact_anc.sites_position[:] / ts.sequence_length] + [1])
         exact_anc_focal_distance = np.zeros(exact_anc.num_ancestors)
         for j in range(exact_anc.num_ancestors):
             focal = focal_sites[j]
             if len(focal) > 0:
-                exact_anc_focal_distance[j] = focal[-1] - focal[0]
+                exact_anc_focal_distance[j] = pos[focal[-1]] - pos[focal[0]]
         results.update({
             "exact_anc_num": exact_anc.num_ancestors,
             "exact_anc_mean_len": np.mean(exact_anc_length),
@@ -1036,18 +470,13 @@ def run_ancestor_properties(args):
     progress.close()
 
     df = pd.DataFrame(results)
-    df.length /= MB
     dfg = df.groupby(df.length).mean()
     print(dfg)
 
     name_format = os.path.join(
-        args.destination_dir, "anc-prop_n={}_L={}_mu={}_rho={}_{{}}.png".format(
-        args.sample_size, args.length, args.mutation_rate, args.recombination_rate))
+        args.destination_dir, "anc-prop_n={}_L={}_mu={}_rho={}_{{}}".format(
+            args.sample_size, args.length, args.mutation_rate, args.recombination_rate))
 
-    # plt.plot(
-    #     dfg.num_sites, dfg.exact_anc_num / dfg.estimated_anc_num,
-    #     label="")
-        # label="exact ancestors")
     plt.plot(dfg.num_sites, dfg.estimated_anc_num, label="estimated ancestors")
     if not args.skip_exact:
         plt.plot(dfg.num_sites, dfg.exact_anc_num, label="exact ancestors")
@@ -1057,7 +486,7 @@ def run_ancestor_properties(args):
     # plt.ylabel("inferred # ancestors / exact # ancestors")
     plt.xlabel("Num sites")
     plt.legend()
-    plt.savefig(name_format.format("num"))
+    save_figure(name_format.format("num"))
     plt.clf()
 
     plt.plot(dfg.num_sites, dfg.estimated_anc_mean_len, label="estimated ancestors")
@@ -1069,7 +498,7 @@ def run_ancestor_properties(args):
     # plt.ylabel("inferred # ancestors / exact # ancestors")
     plt.xlabel("Num sites")
     plt.legend()
-    plt.savefig(name_format.format("mean_len"))
+    save_figure(name_format.format("mean_len"))
     plt.clf()
 
     plt.plot(
@@ -1085,22 +514,45 @@ def run_ancestor_properties(args):
     # plt.ylabel("inferred # ancestors / exact # ancestors")
     plt.xlabel("Num sites")
     plt.legend()
-    plt.savefig(name_format.format("mean_focal_distance"))
+    save_figure(name_format.format("mean_focal_distance"))
     plt.clf()
+
 
 def running_mean(x, N):
     cumsum = np.cumsum(np.insert(x, 0, 0))
     return (cumsum[N:] - cumsum[:-N]) / float(N)
 
+
 def running_median(x, N):
-    idx = np.arange(N) + np.arange(len(x)-N+1)[:,None]
-    b = [row[row>0] for row in x[idx]]
-    return np.array(list(map(np.median,b)))
+    idx = np.arange(N) + np.arange(len(x)-N+1)[:, None]
+    b = [row[row > 0] for row in x[idx]]
+    return np.array(list(map(np.median, b)))
 
 
-def run_ancestor_comparison(args):
+class NormalizeBandWidths(mp.colors.Normalize):
+    """
+    normalise a range into 0..1 where ranges of integers are banded
+    into a single colour. The init parameter band_widths needs to be
+    a numpy vector of length the maximum integer encountered
+    """
+
+    def __init__(self, vmin=None, vmax=None, band_widths=None, clip=False):
+        self.bands = np.cumsum(band_widths) / np.sum(band_widths)
+        self.x = np.arange(len(self.bands))
+        mp.colors.Normalize.__init__(self, vmin, vmax, clip)
+
+    def __call__(self, value, clip=None):
+        return np.ma.masked_array(np.interp(value, self.x, self.bands))
+
+
+def sim_true_and_inferred_ancestors(args):
+    """
+    Run a simulation under args and return the samples, plus the true and the inferred
+    ancestors
+    """
     MB = 10**6
     rng = random.Random(args.random_seed)
+    np.random.seed(args.random_seed)
     sim_args = {
         "sample_size": args.sample_size,
         "length": args.length * MB,
@@ -1118,194 +570,389 @@ def run_ancestor_comparison(args):
         for s, v in zip(ts.sites(), V):
             sample_data.add_site(s.position, v,  ["0", "1"])
 
-    estimated_anc = tsinfer.generate_ancestors(sample_data)
-    exact_anc = tsinfer.AncestorData(sample_data)
-    tsinfer.build_simulated_ancestors(sample_data, exact_anc, ts)
-    exact_anc.finalise()
+    inferred_anc = tsinfer.generate_ancestors(sample_data)
+    true_anc = tsinfer.AncestorData(sample_data)
+    tsinfer.build_simulated_ancestors(sample_data, true_anc, ts)
+    true_anc.finalise()
+    return sample_data, true_anc, inferred_anc
 
-    if args.physical_length:
-        length_units = "(kb)"
-        pos = np.append(estimated_anc.sites_position[:], estimated_anc.sequence_length)
-        estimated_anc_length = (pos[estimated_anc.ancestors_end[:]] - pos[estimated_anc.ancestors_start[:]])/1000
-        pos = np.append(exact_anc.sites_position[:], exact_anc.sequence_length)
-        exact_anc_length = (pos[exact_anc.ancestors_end[:]] - pos[exact_anc.ancestors_start[:]])/1000
-    else:
-        length_units = "(# inf sites)"
-        estimated_anc_length = estimated_anc.ancestors_end[:] - estimated_anc.ancestors_start[:]
-        exact_anc_length = exact_anc.ancestors_end[:] - exact_anc.ancestors_start[:]
 
+def ancestor_data_by_pos(anc1, anc2):
+    """
+    Return indexes into ancestor data, keyed by focal site position, returning only
+    those indexes where positions are the same for both ancestors. This is useful
+    e.g. for plotting length v length scatterplots.
+    """
+    anc_by_focal_pos = []
+    for anc in (anc1, anc2):
+        position_to_index = {anc.sites_position[:][site_index]: i
+                             for i, sites in enumerate(anc.ancestors_focal_sites[:])
+                             for site_index in sites}
+        anc_by_focal_pos.append(position_to_index)
+
+    # NB with error we may not have exactly the same focal sites in exact & estimated
+    shared_indices = set.intersection(*[set(a.keys()) for a in anc_by_focal_pos])
+
+    return {pos: np.array([anc_by_focal_pos[0][pos], anc_by_focal_pos[1][pos]], np.int)
+            for pos in shared_indices}
+
+
+def run_ancestor_comparison(args):
+    sample_data, exact_anc, estimated_anc = sim_true_and_inferred_ancestors(args)
+    # Convert lengths to kb.
+    estimated_anc_length = estimated_anc.ancestors_length / 1000
+    exact_anc_length = exact_anc.ancestors_length / 1000
+    max_length = sample_data.sequence_length / 1000
     name_format = os.path.join(
-        args.destination_dir, "anc-comp_n={}_L={}_mu={}_rho={}_err={}_{}_{{}}".format(
-        args.sample_size, args.length, args.mutation_rate, args.recombination_rate,
-        args.error_probability, ("kb" if args.physical_length else "sites")))
+        args.destination_dir, "anc-comp_n={}_L={}_mu={}_rho={}_err={}_{{}}".format(
+            args.sample_size, args.length, args.mutation_rate, args.recombination_rate,
+            args.error_probability))
     if args.store_data:
+        # TODO Are we using this option for anything?
         filename = name_format.format("length.json")
-        data = { #don't store the longest (root) ancestor
+        # Don't store the longest (root) ancestor
+        data = {
             "exact_ancestors": exact_anc_length[1:].tolist(),
             "estimated_ancestors": estimated_anc_length[1:].tolist()}
         with open(filename, "w") as f:
             json.dump(data, f)
 
-    plt.hist([exact_anc_length[1:], estimated_anc_length[1:]], label=["Exact", "Estimated"])
-    plt.ylabel("Length" + length_units)
+    plt.hist(
+        [exact_anc_length[1:], estimated_anc_length[1:]], label=["Exact", "Estimated"])
+    plt.ylabel("Length (kb)")
     plt.legend()
-    plt.savefig(name_format.format("length-dist.png"))
+    save_figure(name_format.format("length-dist"))
     plt.clf()
-    
 
-    
-    frequency = estimated_anc.ancestors_time[:] + 1
-    #check that frequencies from ancestors_time really do reflect the prevalance in the popn
-    n_ton_table = np.bincount([np.sum(v.genotypes) for v in ts.variants()])
-    for n, (expected, observed) in enumerate(zip(
-        n_ton_table, np.bincount(np.repeat(frequency, [len(x) for x in estimated_anc.ancestors_focal_sites[:]])))):
-        if n != 1: #singletons are omitted from the inferred ancestors_time
-            assert expected == observed
-    print("site frequencies:\n",
-        pd.DataFrame.from_dict({'count': n_ton_table}, orient='index', columns=list(range(len(n_ton_table)))))
-    print("estimated doubleton lengths:\n", estimated_anc_length[frequency==2])
-    plt.hist(estimated_anc_length[frequency==2], bins=50)
+    # NB ancestors_time is not exactly the same as frequency, because frequency
+    # categories that are not represented in the data will be missed out. If we want a
+    # true frequency, we therefore need to get it directly from the samples
+    pos_to_ancestor = {}
+    estimated_anc.ancestors_focal_freq = np.zeros(estimated_anc.num_ancestors, np.int)
+    for a, focal_sites in enumerate(estimated_anc.ancestors_focal_sites[:]):
+        for focal_site in focal_sites:
+            pos_to_ancestor[estimated_anc.sites_position[:][focal_site]] = a
+    for i, g in sample_data.genotypes(inference_sites=True):
+        pos = sample_data.sites_position[:][i]
+        if estimated_anc.ancestors_focal_freq[pos_to_ancestor[pos]]:
+            # check all focal sites in an ancestor have the same freq
+            assert np.sum(g) == estimated_anc.ancestors_focal_freq[pos_to_ancestor[pos]]
+        estimated_anc.ancestors_focal_freq[pos_to_ancestor[pos]] = np.sum(g)
+
+    print("estimated doubleton lengths")
+    print(estimated_anc_length[estimated_anc.ancestors_focal_freq == 2])
+    plt.hist(estimated_anc_length[estimated_anc.ancestors_focal_freq == 2], bins=50)
     plt.xlabel("doubleton ancestor length")
-    plt.savefig(name_format.format("doubleton-length-dist.png"))
+    save_figure(name_format.format("doubleton-length-dist"))
     plt.clf()
 
-    #plot scatterplot of actual vs inferred ancestor lengths, per site
-    exact_lengths_by_inference_index = {exact_anc.sites_position[:][site_index]:[l, t] 
-        for l, sites, t in zip(exact_anc_length, exact_anc.ancestors_focal_sites[:], exact_anc.ancestors_time[:]) \
-            for site_index in sites}
-    estimated_lengths_by_inference_index = {estimated_anc.sites_position[:][site_index]:[l, t] 
-        for l, sites, t in zip(estimated_anc_length, estimated_anc.ancestors_focal_sites[:], estimated_anc.ancestors_time[:]+1) \
-            for site_index in sites}
-    #check that we have the same set of indexes used for inference
-    assert not (set(exact_lengths_by_inference_index.keys()) ^ set(estimated_lengths_by_inference_index.keys()))
-    shared_indices = set(exact_lengths_by_inference_index.keys()) & set(estimated_lengths_by_inference_index.keys())
-    
-    figures = []
-    for colorscale in ("Frequency", "True time order"):
-        fig = plt.figure(figsize=(10,10), dpi=100)
+    anc_indexes = ancestor_data_by_pos(exact_anc, estimated_anc)
+    # convert to a 2d numpy array for convenience
+    exact_v_estimated_indexes = np.array([v for v in anc_indexes.values()])
+
+    for colorscale in ("Frequency", "True_time"):
+        fig = plt.figure(figsize=(10, 10), dpi=100)
         if args.length_scale == "log":
             plt.yscale('log')
             plt.xscale('log')
-        if colorscale=="Frequency":
-            cs = [estimated_lengths_by_inference_index[k][1] for k in shared_indices]            
+        if colorscale != "Frequency":
+            cs = exact_anc.ancestors_time[:][exact_v_estimated_indexes[:, 0]]
         else:
-            cs = [exact_lengths_by_inference_index[k][1] for k in shared_indices]
+            cs = estimated_anc.ancestors_focal_freq[exact_v_estimated_indexes[:, 1]]
         plt.scatter(
-            [exact_lengths_by_inference_index[k][0] for k in shared_indices],
-            [estimated_lengths_by_inference_index[k][0] for k in shared_indices],
-            c = cs, cmap='cool', s=2)
+            exact_anc_length[exact_v_estimated_indexes[:, 0]],
+            estimated_anc_length[exact_v_estimated_indexes[:, 1]],
+            c=cs, cmap='brg', s=2, norm=NormalizeBandWidths(band_widths=np.bincount(cs)))
+        plt.plot([1, max_length], [1, max_length], '-', color='grey', zorder=-1)
+        plt.xlim(1, max_length)
+        plt.ylim(1, max_length)
         cbar = plt.colorbar()
         cbar.set_label(colorscale, rotation=270)
-        plt.xlabel("True ancestor length per variant " + length_units)
-        plt.ylabel("Inferred ancestor length per variant " + length_units)
-        figures.append(fig)
-    with matplotlib.backends.backend_pdf.PdfPages(name_format.format("length-scatter.pdf")) as pdf:
-        for fig in figures:
-            pdf.savefig(fig, dpi=100)
-    
+        plt.xlabel("True ancestor length per variant (kb)")
+        plt.ylabel("Inferred ancestor length per variant (kb)")
+        save_figure(name_format.format("length-scatter_{}".format(colorscale.lower())))
 
-    #plot exact ancestors ordered by time, and estimated ancestors in frequency bands
-    #one point per variable site, so these should be directly comparable
-    #the exact ancestors have ancestors_time from 1..n_ancestors, ordered by real time
-    #in the simulation, so that each time is unique for a set of site on one ancestor
-    figures = []
+    # plot exact ancestors ordered by time, and estimated ancestors in frequency bands
+    # one point per variable site, so these should be directly comparable
+    # the exact ancestors have ancestors_time from 1..n_ancestors, ordered by real time
+    # in the simulation, so that each time is unique for a set of site on one ancestor
     for ancestors_are_estimated, anc in enumerate([exact_anc, estimated_anc]):
         time = anc.ancestors_time[:] + (1 if ancestors_are_estimated else 0)
-        positions = np.append(anc.sites_position[:], anc.sequence_length)
-        lengths_by_sites = anc.ancestors_end[:]-anc.ancestors_start[:]
-        lengths_by_pos = (positions[anc.ancestors_end[:]]-positions[anc.ancestors_start[:]])/1000.0
-                
         df = pd.DataFrame({
-            'start':anc.ancestors_start[:],
-            'end':anc.ancestors_end[:],
-            'l':lengths_by_pos if args.physical_length else lengths_by_sites,
-            'time':time, 
+            'start': anc.ancestors_start[:],
+            'end': anc.ancestors_end[:],
+            'l': anc.ancestors_length / 1000,
+            'time': time,
             'nsites': [len(x) for x in anc.ancestors_focal_sites[:]]})
-        
+
         df_all = pd.DataFrame({
             'lengths_per_site': np.repeat(df.l.values, df.nsites.values),
             'time': np.repeat(df.time.values, df.nsites.values),
-            'const':1
-            }).sort_values(by=['time'])
+            'const': 1
+        }).sort_values(by=['time'])
         sum_per_timeslice = df_all.groupby('time').sum().const.values
         df_all['x_pos'] = range(df_all.shape[0])
-        df_all['mean_x_pos'] = np.repeat(df_all.groupby('time').mean().x_pos.values, sum_per_timeslice)
+        df_all['mean_x_pos'] = np.repeat(
+            df_all.groupby('time').mean().x_pos.values, sum_per_timeslice)
         df_all['width'] = np.repeat(sum_per_timeslice, sum_per_timeslice)
-        
-        mean_by_anc_time = df.iloc[df['nsites'].nonzero()].groupby('time', sort=True).mean()
-        median_by_anc_time = df.iloc[df['nsites'].nonzero()].groupby('time', sort=True).median()
-        sum_by_anc_time = df.iloc[df['nsites'].nonzero()].groupby('time', sort=True).sum()
-        
+
+        mean_by_anc_time = df.iloc[df['nsites'].nonzero()].groupby(
+            'time', sort=True).mean()
+        median_by_anc_time = df.iloc[df['nsites'].nonzero()].groupby(
+            'time', sort=True).median()
+        sum_by_anc_time = df.iloc[df['nsites'].nonzero()].groupby(
+            'time', sort=True).sum()
+
         line_x = np.insert(np.cumsum(sum_by_anc_time['nsites']).values, 0, 0)
-        
+
         if ancestors_are_estimated:
-            #averaging over times is probably more-or-less OK
+            # averaging over times is probably more-or-less OK
             lines_y = [mean_by_anc_time.l, median_by_anc_time.l]
             names = ["Mean", "Median"]
-            linestyles = ["-",":"]
+            linestyles = ["-", ":"]
             colours = ["orange", "darkorange"]
         else:
-            #times are unique per ancestor, so we don't do well averaging - have to use a running mean
+            # times are unique per ancestor, so we don't do well averaging
+            # have to use a running mean
             assert args.running_average_span % 2 == 1, "Must have odd number of bins"
-            lines_y = [
-                np.pad(
-                    running_mean(mean_by_anc_time.l.values, args.running_average_span), 
-                    (args.running_average_span-1)//2, mode='constant',constant_values=(np.nan,)),
-                np.pad(
-                    running_median(median_by_anc_time.l.values, args.running_average_span), 
-                    (args.running_average_span-1)//2, mode='constant',constant_values=(np.nan,))
-                ]
+            pad_mean = np.pad(
+                running_mean(mean_by_anc_time.l.values, args.running_average_span),
+                (args.running_average_span - 1) // 2,
+                mode='constant', constant_values=(np.nan,))
+            pad_median = np.pad(
+                running_median(median_by_anc_time.l.values, args.running_average_span),
+                (args.running_average_span - 1) // 2,
+                mode='constant', constant_values=(np.nan,))
+            lines_y = [pad_mean, pad_median]
             names = [
-                "Running mean over {} ancestors".format(args.running_average_span), 
+                "Running mean over {} ancestors".format(args.running_average_span),
                 "Running median over {} ancestors".format(args.running_average_span)]
-            linestyles = ["-",":"]
+            linestyles = ["-", ":"]
             colours = ["limegreen", "forestgreen"]
-            #save some stuff for when we plot inferred lines
+            # save some stuff for when we plot inferred lines
             exact_mean_line_y = lines_y[0]
             exact_median_line_y = lines_y[1]
             exact_line_x = line_x
-            max_y = np.max(df_all.lengths_per_site.values)
-        
-        fig = plt.figure(figsize=(10,10), dpi=100)
-        x_jittered = df_all.mean_x_pos.values + \
-            np.random.uniform(-df_all.width.values*9/20, df_all.width.values*9/20, len(df_all.mean_x_pos.values))
-        #plot with jitter
-        plt.scatter(x_jittered, df_all.lengths_per_site.values, marker='.', s=72./fig.dpi, alpha=0.75, color="black")
+            # max_y = np.max(df_all.lengths_per_site.values)
+
+        fig = plt.figure(figsize=(10, 10), dpi=100)
+        w = df_all.width.values * 9 / 20
+        jitter = np.random.uniform(-w, w, len(df_all.mean_x_pos.values))
+        x_jittered = df_all.mean_x_pos.values + jitter
+        plt.scatter(
+            x_jittered, df_all.lengths_per_site.values,
+            marker='.', s=72./fig.dpi, alpha=0.75, color="black")
+        # plt.ylim(1 / (1000 if args.physical_length else 1), max_y*1.02)
         if args.length_scale == "log":
-            plt.ylim(1/(1000 if args.physical_length else 1), max_y*1.02)
             plt.yscale("log")
-        else:
-            plt.ylim(1/(1000 if args.physical_length else 1), max_y**1.02)
         ax = plt.gca()
         ax.set_xlim(xmin=0, xmax=max(line_x))
         if ancestors_are_estimated:
             plt.title("Ancestor lengths as estimated by tsinfer")
-            ax.step(exact_line_x[:-1], exact_mean_line_y, label="True mean", where='post', color="limegreen")
-            ax.step(exact_line_x[:-1], exact_median_line_y, label="True median", where='post', color="forestgreen", linestyle=":")
+            ax.step(
+                exact_line_x[:-1], exact_mean_line_y, label="True mean",
+                where='post', color="limegreen")
+            ax.step(
+                exact_line_x[:-1], exact_median_line_y, label="True median",
+                where='post', color="forestgreen", linestyle=":")
             plt.xlabel("Ancestors_freq (youngest to oldest)")
             ax.set_xlim(xmin=0)
             ax.tick_params(axis='x', which="major", length=0)
             ax.set_xticklabels('', minor=True)
             ax.set_xticks(line_x[:-1], minor=True)
-            ax.set_xticks(line_x[:-1]+np.diff(line_x)/2)
+            ax.set_xticks(line_x[:-1] + np.diff(line_x) / 2)
             ax.set_xticklabels(np.where(
-                np.isin(mean_by_anc_time.index, np.array([1,2,3,4,5,6,10,50,1000, 5000])), 
+                np.isin(
+                    mean_by_anc_time.index,
+                    np.array([1, 2, 3, 4, 5, 6, 10, 50, 1000, 5000])),
                 mean_by_anc_time.index,
                 ""))
         else:
             plt.title("True ancestor lengths, ordered by known simulation time")
             plt.xlabel("Ancestors_time index (youngest to oldest)")
-        
+
         for y, label, linestyle, colour in zip(lines_y, names, linestyles, colours):
-            ax.step(line_x[:-1], y, label=label, where='post', color=colour, linestyle=linestyle)
-        plt.ylabel("Length " + length_units)
+            ax.step(
+                line_x[:-1], y, label=label, where='post', color=colour,
+                linestyle=linestyle)
+        plt.ylabel("Length (kb)")
         plt.legend(loc='upper center')
-        figures.append(fig)
-    
-    with matplotlib.backends.backend_pdf.PdfPages(
-        name_format.format("time.pdf")) as pdf:
-        for fig in figures:
-            pdf.savefig(fig, dpi=100)
+        save_figure(
+            name_format.format("time_{}".format(
+                "estimated" if ancestors_are_estimated else "true_ancestors")))
+
+
+def binomial_confidence(x, n, z=1.96):
+    """
+    Calculate the Wilson binomial interval, e.g. from 
+    https://stackoverflow.com/questions/10029588/python-implementation-of-the-wilson-score-interval
+    """ # noqa
+    phat = x / n
+    d = z * np.sqrt((phat*(1-phat)+z*z/(4*n))/n)
+    return np.array([
+        (phat + z*z/(2*n) - d)/(1+z*z/n),
+        (phat + z*z/(2*n) + d)/(1+z*z/n)])
+
+
+def run_ancestor_quality(args):
+    """
+    Calculate quality measures per focal site, as these are comparable from estimated
+    to exact ancestors. This is a bit complicated because we don't always have the same
+    inference sites in estimated & exact ancestors, so we need to only check the sites
+    that are shared. We also need to limit the bounds over which we calculate quality
+    so that we only look at the regions of overlap between true and inferred ancestors
+    """
+    sample_data, exact_anc, estim_anc = sim_true_and_inferred_ancestors(args)
+
+    name_format = os.path.join(
+        args.destination_dir, "anc-qual_n={}_L={}_mu={}_rho={}_err={}_{{}}".format(
+            args.sample_size, args.length, args.mutation_rate, args.recombination_rate,
+            args.error_probability))
+
+    anc_indices = ancestor_data_by_pos(exact_anc, estim_anc)
+    shared_positions = np.array(list(anc_indices.keys()))
+    # append sequencer_length to pos so that ancestors_end[:] indices are always valid
+    exact_positions = np.append(exact_anc.sites_position[:], sample_data.sequence_length)
+    estim_positions = np.append(estim_anc.sites_position[:], sample_data.sequence_length)
+    # only include sites which are focal in both exact and estim in the genome-wise masks
+    exact_sites_mask = np.isin(exact_anc.sites_position[:], shared_positions)
+    estim_sites_mask = np.isin(estim_anc.sites_position[:], shared_positions)
+    assert np.sum(exact_sites_mask) == np.sum(estim_sites_mask) == len(anc_indices)
+
+    # store the data to plot for each focal_site, keyed by position
+    freq = {sample_data.sites_position[:][i]: np.sum(g)
+            for i, g in sample_data.genotypes(inference_sites=None)}
+    olap_nsites = {}
+    olap_ndiff = {}
+    olap_length = {}
+    true_length = {}
+    true_time = {}
+    # find the left and right edges of the overlap
+    for focal_pos in sorted(anc_indices.keys()):
+        exact_index, estim_index = anc_indices[focal_pos]
+        # left (start) is biggest of exact and estim
+        if exact_positions[exact_anc.ancestors_start[:][exact_index]] > \
+                estim_positions[estim_anc.ancestors_start[:][estim_index]]:
+            olap_start_exact = exact_anc.ancestors_start[:][exact_index]
+            olap_start = exact_positions[olap_start_exact]
+            olap_start_estim = np.searchsorted(estim_anc.sites_position[:], olap_start)
+        else:
+            olap_start_estim = estim_anc.ancestors_start[:][estim_index]
+            olap_start = estim_positions[olap_start_estim]
+            olap_start_exact = np.searchsorted(exact_anc.sites_position[:], olap_start)
+
+        # right (end) is smallest of exact and estim
+        if exact_positions[exact_anc.ancestors_end[:][exact_index]] < \
+                estim_positions[estim_anc.ancestors_end[:][estim_index]]:
+            olap_end_exact = exact_anc.ancestors_end[:][exact_index]
+            olap_end = exact_positions[olap_end_exact]
+            olap_end_estim = np.searchsorted(estim_anc.sites_position[:], olap_end)
+        else:
+            olap_end_estim = estim_anc.ancestors_end[:][estim_index]
+            olap_end = estim_positions[olap_end_estim]
+            olap_end_exact = np.searchsorted(exact_anc.sites_position[:], olap_end)
+
+        # ancestors_haplotype[x] contains a vector of inferred sites only
+        # between ancestors_start[x] and ancestors_end[x]. To match it to the genome-wide
+        # mask we need to account for the offset before masking out non-shared sites
+        exact_full_hap = exact_anc.ancestors_haplotype[:][exact_index]
+        offset = exact_anc.ancestors_start[:][exact_index]
+        exact_olap = exact_full_hap[(olap_start_exact-offset):(olap_end_exact-offset)]
+        exact_comp = exact_olap[exact_sites_mask[olap_start_exact:olap_end_exact]]
+
+        estim_full_hap = estim_anc.ancestors_haplotype[estim_index]
+        offset = estim_anc.ancestors_start[:][estim_index]
+        estim_olap = estim_full_hap[(olap_start_estim-offset):(olap_end_estim-offset)]
+        estim_comp = estim_olap[estim_sites_mask[olap_start_estim:olap_end_estim]]
+
+        assert len(exact_comp) == len(estim_comp)
+
+        olap_nsites[focal_pos] = len(exact_comp)
+        olap_ndiff[focal_pos] = np.sum(exact_comp != estim_comp)
+        olap_length[focal_pos] = olap_end-olap_start
+        true_length[focal_pos] = exact_anc.ancestors_length[:][exact_index]
+        true_time[focal_pos] = exact_anc.ancestors_time[:][exact_index]
+        assert olap_length[focal_pos] <= true_length[focal_pos]
+
+    data = np.array([[
+        freq[p], olap_nsites[p], olap_ndiff[p],
+        true_length[p], olap_length[p], true_time[p]
+        ] for p in anc_indices.keys()])
+
+    x_axis_length_metric = "fraction"  # or e.g. "fraction"
+    y = data[:, 2] / data[:, 1]
+    if x_axis_length_metric == "absolute":
+        x = (data[:, 3] - data[:, 4])+1
+        plt.xlabel("Absolute length of missing ancestor + 1")
+        plt.xscale('log')
+        plt.xlim(0.8, np.max(x))
+    elif x_axis_length_metric == "fraction":
+        x = 1 - (data[:, 4] / data[:, 3])
+        plt.xlabel("Fraction of true ancestor missing from inferred")
+    else:
+        assert False, "Set x_axis_length_metric to 'absolute' or 'fraction'"
+
+    name = "quality-by-missingness"
+    plt.scatter(
+        x, y, c=data[:, 0], cmap='brg', s=2,
+        norm=NormalizeBandWidths(band_widths=np.bincount(data[:, 0].astype(np.int))))
+    plt.errorbar(
+        x, y, yerr=np.abs(binomial_confidence(data[:, 2], data[:, 1]) - y),
+        fmt='none', ecolor='0.9', zorder=-2, s=1)
+    lengthsort = x.argsort()
+    pad_mean = np.pad(
+        running_mean(y[lengthsort], args.running_average_span),
+        (args.running_average_span - 1) // 2,
+        mode='constant', constant_values=(np.nan,))
+    plt.plot(x[lengthsort], pad_mean, 'k-', lw=1, zorder=-1)
+    cbar = plt.colorbar()
+    cbar.set_label("Frequency", rotation=270, labelpad=20)
+    plt.ylabel("Sequence difference in overlapping region")
+    plt.ylim(-0.01, 1)
+    save_figure(name_format.format(name))
+
+    name = "quality-by-freq"
+    df = pd.DataFrame(data={'seq_diff': y, 'freq': data[:, 0].astype(np.int)})
+    g = df.groupby('freq')
+    plt.errorbar(
+        g.sem().index, g.mean().values, yerr=g.sem().values,
+        marker="o", ls='none', ecolor='0.6')
+    plt.ylabel("Sequence difference in overlapping region")
+    plt.xlabel("Freq")
+    save_figure(name_format.format(name))
+
+    name = "quality-by-time"
+    plt.scatter(
+        data[:, 5], y, c=data[:, 0], cmap='brg', s=2,
+        norm=NormalizeBandWidths(band_widths=np.bincount(data[:, 0].astype(np.int))))
+    plt.errorbar(
+        data[:, 5], y, yerr=np.abs(binomial_confidence(data[:, 2], data[:, 1]) - y),
+        fmt='none', ecolor='0.9', zorder=-2, s=1)
+    timesort = data[:, 5].argsort()
+    pad_mean = np.pad(
+        running_mean(y[timesort], args.running_average_span),
+        (args.running_average_span - 1) // 2,
+        mode='constant', constant_values=(np.nan,))
+    plt.plot(data[timesort, 5], pad_mean, 'k-', lw=1, zorder=-1)
+    cbar = plt.colorbar()
+    cbar.set_label("Frequency", rotation=270, labelpad=20)
+    plt.ylabel("Sequence difference in overlapping region")
+    plt.xlabel("True ancestor time index")
+    plt.ylim(-0.01, 1)
+    save_figure(name_format.format(name))
+
+    name = "quality-by-length"
+    plt.scatter(
+        data[:, 3], y, c=data[:, 0], cmap='brg', s=2,
+        norm=NormalizeBandWidths(band_widths=np.bincount(data[:, 0].astype(np.int))))
+    cbar = plt.colorbar()
+    cbar.set_label("Frequency", rotation=270, labelpad=20)
+    plt.ylabel("Sequence difference in overlapping region")
+    plt.xlabel("Overlap length")
+    plt.xscale('log')
+    plt.ylim(-0.01, 1)
+    plt.xlim(1)
+    save_figure(name_format.format(name))
 
 
 def get_node_degree_by_depth(ts):
@@ -1342,35 +989,37 @@ def run_node_degree(args):
         "random_seed": rng.randint(1, 2**30)}
     smc_ts = msprime.simulate(**sim_args)
 
-    engine= "C"
+    engine = tsinfer.C_ENGINE
     df = pd.DataFrame()
     for path_compression in [True, False]:
         estimated_ancestors_ts = run_infer(
-            smc_ts, engine=engine, exact_ancestors=False, path_compression=path_compression)
+            smc_ts, engine=engine, exact_ancestors=False,
+            path_compression=path_compression)
         degree, depth = get_node_degree_by_depth(estimated_ancestors_ts)
         df = df.append(pd.DataFrame({
-            "degree": degree, "depth": depth, "type":"estimated",
+            "degree": degree, "depth": depth, "type": "estimated",
             "path_compression": path_compression}))
         exact_ancestors_ts = run_infer(
-            smc_ts, engine=engine, exact_ancestors=True, path_compression=path_compression)
+            smc_ts, engine=engine, exact_ancestors=True,
+            path_compression=path_compression)
         degree, depth = get_node_degree_by_depth(exact_ancestors_ts)
         df = df.append(pd.DataFrame({
-            "degree": degree, "depth": depth, "type":"exact",
+            "degree": degree, "depth": depth, "type": "exact",
             "path_compression": path_compression}))
 
     name_format = os.path.join(
-        args.destination_dir, "node-degree_n={}_L={}_mu={}_rho={}_{{}}.png".format(
-        args.sample_size, args.length, args.mutation_rate, args.recombination_rate))
+        args.destination_dir, "node-degree_n={}_L={}_mu={}_rho={}_{{}}".format(
+            args.sample_size, args.length, args.mutation_rate, args.recombination_rate))
     print(df.describe())
 
-    sns.factorplot(x="depth", y="degree",
-            hue="path_compression", col="type",
-            data=df, kind="bar")
-    plt.savefig(name_format.format("path-compression"))
+    sns.factorplot(
+        x="depth", y="degree", hue="path_compression", col="type",
+        data=df, kind="bar")
+    save_figure(name_format.format("path-compression"))
     plt.clf()
 
     sns.barplot(x="depth", y="degree", hue="type", data=df[df.path_compression])
-    plt.savefig(name_format.format("length"))
+    save_figure(name_format.format("length"))
     plt.clf()
 
 
@@ -1383,11 +1032,13 @@ def multiple_recombinations(ts):
             return True
     return False
 
+
 def run_perfect_inference(args):
     for seed in range(1, args.num_replicates + 1):
         base_ts = msprime.simulate(
             args.sample_size, Ne=10**4, length=args.length * 10**6,
-            recombination_rate=1e-8, random_seed=seed, model="smc_prime")
+            recombination_rate=1e-8, random_seed=args.random_seed + seed,
+            model="smc_prime")
         print("simulated ts with n={} and {} trees; seed={}".format(
             base_ts.num_samples, base_ts.num_trees, seed))
         if multiple_recombinations(base_ts):
@@ -1434,6 +1085,9 @@ if __name__ == "__main__":
     top_parser.add_argument(
         "-V", "--version", action='version',
         version='%(prog)s {}'.format(tsinfer.__version__))
+    top_parser.add_argument(
+        "-o", "--output-format", default="png",
+        help="The output format for plots")
 
     subparsers = top_parser.add_subparsers(dest="subcommand")
     subparsers.required = True
@@ -1443,7 +1097,7 @@ if __name__ == "__main__":
         help="Runs the perfect inference process on simulated tree sequences.")
     cli.add_logging_arguments(parser)
     parser.set_defaults(runner=run_perfect_inference)
-    parser.add_argument("--engine", default="C")
+    parser.add_argument("--engine", default=tsinfer.C_ENGINE)
     parser.add_argument("--sample-size", "-n", type=int, default=10)
     parser.add_argument(
         "--length", "-l", type=float, default=1, help="Sequence length in MB")
@@ -1461,6 +1115,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--path-compression", "-c", action="store_true",
         help="Turn on path compression. Makes verification much slower.")
+    parser.add_argument("--random-seed", "-s", type=int, default=None)
+    # Not actually used here, but useful to have it for testing.
+    parser.add_argument("--destination-dir", "-d", default="")
 
     parser = subparsers.add_parser(
         "edges-performance", aliases=["ep"],
@@ -1469,7 +1126,7 @@ if __name__ == "__main__":
     parser.set_defaults(runner=run_edges_performance)
     parser.add_argument("--sample-size", "-n", type=int, default=10)
     parser.add_argument(
-        "--length", "-l", type=float, default=1, help="Sequence length in MB")
+        "--length", "-l", type=float, default=0.1, help="Sequence length in MB")
     parser.add_argument(
         "--recombination-rate", "-r", type=float, default=1e-8,
         help="Recombination rate")
@@ -1483,28 +1140,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--compute-tree-metrics", "-T", action="store_true",
         help="Compute tree metrics")
-    parser.add_argument(
-        "--progress", "-p", action="store_true",
-        help="Show a progress monitor.")
-
-    parser = subparsers.add_parser(
-        "effective-recombination", aliases=["er"],
-        help="Shows the effective recombination rate against sample size.")
-    cli.add_logging_arguments(parser)
-    parser.set_defaults(runner=run_effective_recombination)
-    parser.add_argument("--sample-size", "-n", type=int, default=1000)
-    parser.add_argument(
-        "--length", "-l", type=float, default=1, help="Sequence length in MB")
-    parser.add_argument(
-        "--recombination-rate", "-r", type=float, default=1e-8,
-        help="Recombination rate")
-    parser.add_argument(
-        "--mutation-rate", "-u", type=float, default=1e-8,
-        help="Mutation rate")
-    parser.add_argument("--num-replicates", "-R", type=int, default=10)
-    parser.add_argument("--num-processes", "-P", type=int, default=None)
-    parser.add_argument("--random-seed", "-s", type=int, default=None)
-    parser.add_argument("--destination-dir", "-d", default="")
     parser.add_argument(
         "--progress", "-p", action="store_true",
         help="Show a progress monitor.")
@@ -1541,31 +1176,6 @@ if __name__ == "__main__":
         help="Show a progress monitor.")
 
     parser = subparsers.add_parser(
-        "error-analysis", aliases=["ea"],
-        help="Runs plots analysing the effects of inserted errors.")
-    cli.add_logging_arguments(parser)
-    parser.set_defaults(runner=run_error_analysis)
-    parser.add_argument("--sample-size", "-n", type=int, default=10)
-    parser.add_argument(
-        "--length", "-l", type=float, default=1, help="Sequence length in MB")
-    parser.add_argument(
-        "--recombination-rate", "-r", type=float, default=1e-8,
-        help="Recombination rate")
-    parser.add_argument(
-        "--mutation-rate", "-u", type=float, default=1e-8,
-        help="Mutation rate")
-    parser.add_argument(
-        "--error-probability", "-e", type=float, default=0.01,
-        help="Probability of errors.")
-    parser.add_argument("--num-replicates", "-R", type=int, default=10)
-    parser.add_argument("--num-processes", "-P", type=int, default=None)
-    parser.add_argument("--random-seed", "-s", type=int, default=None)
-    parser.add_argument("--destination-dir", "-d", default="")
-    parser.add_argument(
-        "--progress", "-p", action="store_true",
-        help="Show a progress monitor.")
-
-    parser = subparsers.add_parser(
         "ancestor-properties", aliases=["ap"],
         help="Runs plots showing the properties of estimated ancestors.")
     cli.add_logging_arguments(parser)
@@ -1592,7 +1202,9 @@ if __name__ == "__main__":
 
     parser = subparsers.add_parser(
         "ancestor-comparison", aliases=["ac"],
-        help="Runs plots comparing the real and simulated ancestors for a single instance.")
+        help=(
+            "Runs plots comparing the real and simulated ancestors "
+            "for a single instance."))
     cli.add_logging_arguments(parser)
     parser.set_defaults(runner=run_ancestor_comparison)
     parser.add_argument("--sample-size", "-n", type=int, default=60)
@@ -1612,12 +1224,44 @@ if __name__ == "__main__":
     parser.add_argument(
         "--store-data", "-S", action="store_true",
         help="Store the raw data.")
-    parser.add_argument("--physical-length", "-pl", action='store_true',
-        help='Should we plot the lengths in terms of physical lengths along the chromosome or just # sites')
-    parser.add_argument("--length-scale", "-ls", choices=['linear', 'log'], default="linear",
-        help='Should we transform lengths when plotting')
-    parser.add_argument("--running-average-span", "-av", type=int, default=51,
-        help='How many ancestors should we average over when calculating running means and medians (must be an odd number)')
+    parser.add_argument(
+        "--length-scale", "-X", choices=['linear', 'log'], default="linear",
+        help='Length scale for distances when plotting')
+    parser.add_argument(
+        "--running-average-span", "-A", type=int, default=51,
+        help=(
+            "How many ancestors should we average over when calculating "
+            "running means and medians (must be an odd number)"))
+
+    parser = subparsers.add_parser(
+        "ancestor-quality", aliases=["aq"],
+        help=(
+            "Runs plots comparing the quality of simulated compared to real ancestors"
+            "for a single instance."))
+    cli.add_logging_arguments(parser)
+    parser.set_defaults(runner=run_ancestor_quality)
+    parser.add_argument("--sample-size", "-n", type=int, default=60)
+    parser.add_argument(
+        "--length", "-l", type=float, default=1, help="Sequence length in MB")
+    parser.add_argument(
+        "--recombination-rate", "-r", type=float, default=1e-8,
+        help="Recombination rate")
+    parser.add_argument(
+        "--mutation-rate", "-u", type=float, default=1e-8,
+        help="Mutation rate")
+    parser.add_argument(
+        "--error-probability", "-e", type=float, default=0,
+        help="Error probability")
+    parser.add_argument("--random-seed", "-s", type=int, default=None)
+    parser.add_argument("--destination-dir", "-d", default="")
+    parser.add_argument(
+        "--length-scale", "-X", choices=['linear', 'log'], default="linear",
+        help='Length scale for distances when plotting')
+    parser.add_argument(
+        "--running-average-span", "-A", type=int, default=51,
+        help=(
+            "How many ancestors should we average over when calculating "
+            "running means and medians (must be an odd number)"))
 
     parser = subparsers.add_parser(
         "node-degree", aliases=["nd"],
@@ -1638,18 +1282,5 @@ if __name__ == "__main__":
 
     args = top_parser.parse_args()
     cli.setup_logging(args)
+    _output_format = args.output_format
     args.runner(args)
-
-
-
-    # check_basic_performance()
-    # check_effect_error_param(float(sys.argv[1]))
-    # plot_basic_performance()
-    # check_variable_recomb()
-    # check_single_tree_one_mutation_per_branch()
-    # check_single_tree_two_mutations_per_branch()
-    # check_single_tree_many_mutations_per_branch()
-    # check_single_tree_high_mutation_rate()
-    # check_many_trees_one_mutation_per_branch()
-
-
