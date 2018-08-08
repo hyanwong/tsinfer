@@ -31,7 +31,7 @@ import numpy as np
 import msprime
 import sortedcontainers
 
-UNKNOWN_ALLELE = 255
+import tsinfer.constants as constants
 
 
 class Edge(object):
@@ -60,6 +60,10 @@ class AncestorBuilder(object):
     """
     Builds inferred ancestors.
     """
+    # TODO this implementation currently partially allows for multiple focal
+    # sites per ancestor, but the final generation algorithm assumes a single
+    # focal site. Once this is finalise should refactor to remove the complexity
+    # needed for matching up ancestors with identical focal sites.
     def __init__(self, num_samples, num_sites):
         self.num_samples = num_samples
         self.num_sites = num_sites
@@ -98,6 +102,7 @@ class AncestorBuilder(object):
         Returns True if we should split the ancestor with focal sites at
         a and b into two separate ancestors.
         """
+        # return True
         index = np.where(samples == 1)[0]
         for j in range(a + 1, b):
             if self.sites[j].frequency > self.sites[a].frequency:
@@ -131,48 +136,83 @@ class AncestorBuilder(object):
                 ret.append((frequency, focal_sites[start:]))
         return ret
 
-    def __build_ancestor_sites(self, focal_site, sites, a):
-        # print("__build_ancestor_sites", focal_site, sites)
-        g = self.sites[focal_site].genotypes
-        samples = np.where(g == 1)[0]
-        last_older_site = focal_site
+    def compute_ancestral_states(self, a, focal_site, sites):
+        focal_frequency = self.sites[focal_site].frequency
+        min_sample_set_size = focal_frequency // 2
+        S = set(np.where(self.sites[focal_site].genotypes == 1)[0])
+        remove_buffer = []
+        last_site = focal_site
+        # print("Computing for ", focal_site)
         for l in sites:
-            # print("\tl = ", l)
-            if self.sites[l].frequency > self.sites[focal_site].frequency:
-                # print("\texamining:", self.sites[l], self.sites[focal_site].frequency)
-                # print("\tsamples = ", samples)
-                num_ones = np.sum(self.sites[l].genotypes[samples])
-                if num_ones == samples.shape[0]:
-                    a[l] = 1
-                elif num_ones == 0:
-                    a[l] = 0
-                else:
+            a[l] = 0
+            last_site = l
+            if self.sites[l].frequency > focal_frequency:
+                g_l = self.sites[l].genotypes
+                ones = sum(g_l[u] for u in S)
+                zeros = len(S) - ones
+                # print("\t", l, ones, zeros, sep="\t")
+                consensus = 0
+                if ones >= zeros:
+                    consensus = 1
+                # print("\tP", l, "\t", len(S), ":ones=", ones, consensus)
+                for u in remove_buffer:
+                    if g_l[u] != consensus:
+                        # print("\t\tremoving", u)
+                        S.remove(u)
+                # print("\t", len(S), remove_buffer, consensus, sep="\t")
+                if len(S) <= min_sample_set_size:
+                    # print("BREAKING", len(S), min_sample_set_size)
                     break
-                last_older_site = l
-            else:
-                a[l] = 0
-        return last_older_site
+                remove_buffer.clear()
+                for u in S:
+                    if g_l[u] != consensus:
+                        remove_buffer.append(u)
+                a[l] = consensus
+        return last_site
 
     def make_ancestor(self, focal_sites, a):
-        # print("MAKE ANC", focal_sites)
-        a[:] = UNKNOWN_ALLELE
-        focal_site = focal_sites[0]
-        sites = range(focal_sites[-1] + 1, self.num_sites)
-        self.__build_ancestor_sites(focal_site, sites, a)
+        a[:] = constants.UNKNOWN_ALLELE
+        for focal_site in focal_sites:
+            a[focal_site] = 1
+        focal_frequency = self.sites[focal_sites[0]].frequency
+        S = set(np.where(self.sites[focal_sites[0]].genotypes == 1)[0])
+        for j in range(len(focal_sites) - 1):
+            for l in range(focal_sites[j] + 1, focal_sites[j + 1]):
+                a[l] = 0
+                if self.sites[l].frequency > focal_frequency:
+                    g_l = self.sites[l].genotypes
+                    ones = sum(g_l[u] for u in S)
+                    zeros = len(S) - ones
+                    # print("\t", l, ones, zeros, sep="\t")
+                    if ones >= zeros:
+                        a[l] = 1
         focal_site = focal_sites[-1]
-        sites = range(focal_sites[0] - 1, -1, -1)
-        self.__build_ancestor_sites(focal_site, sites, a)
-        for j in range(focal_sites[0], focal_sites[-1] + 1):
-            if j in focal_sites:
-                a[j] = 1
-            else:
-                self.__build_ancestor_sites(focal_site, [j], a)
-        known = np.where(a != UNKNOWN_ALLELE)[0]
-        start = known[0]
-        end = known[-1] + 1
-        # print("Made ancestor", start, end, a)
-        assert np.all(a[start: end] != UNKNOWN_ALLELE)
+        last_site = self.compute_ancestral_states(
+                a, focal_site, range(focal_site + 1, self.num_sites))
+        assert a[last_site] != constants.UNKNOWN_ALLELE
+        end = last_site + 1
+        focal_site = focal_sites[0]
+        last_site = self.compute_ancestral_states(
+                a, focal_site, range(focal_site - 1, -1, -1))
+        assert a[last_site] != constants.UNKNOWN_ALLELE
+        start = last_site
         return start, end
+
+        # Version with 1 focal site
+        # assert len(focal_sites) == 1
+        # focal_site = focal_sites[0]
+        # a[:] = UNKNOWN_ALLELE
+        # a[focal_site] = 1
+
+        # last_site = self.compute_ancestral_states(
+        #         a, focal_site, range(focal_site + 1, self.num_sites))
+        # assert a[last_site] != UNKNOWN_ALLELE
+        # end = last_site + 1
+        # last_site = self.compute_ancestral_states(
+        #         a, focal_site, range(focal_site - 1, -1, -1))
+        # assert a[last_site] != UNKNOWN_ALLELE
+        # start = last_site
+        # return start, end
 
 
 class TreeSequenceBuilder(object):
@@ -195,12 +235,18 @@ class TreeSequenceBuilder(object):
 
     def restore_nodes(self, time, flags):
         for t, flag in zip(time, flags):
-            self.add_node(t, flag == 1)
+            self.add_node(t, flag & 1, is_synthetic=flag & constants.SYNTHETIC_NODE_BIT)
 
-    def add_node(self, time, is_sample=True):
+    def add_node(self, time, is_sample=True, is_synthetic=False):
         self.num_nodes += 1
         self.time.append(time)
-        self.flags.append(int(is_sample))
+        flags = 0
+        if is_sample:
+            flags = 1
+        if is_synthetic:
+            assert not is_sample
+            flags = constants.SYNTHETIC_NODE_BIT
+        self.flags.append(flags)
         self.path.append(None)
         return self.num_nodes - 1
 
@@ -323,7 +369,7 @@ class TreeSequenceBuilder(object):
         Updates the node time for the specified synthetic node ID.
         """
         # print("Getting node time for ", node_id)
-        assert self.flags[node_id] == 0
+        assert self.flags[node_id] == constants.SYNTHETIC_NODE_BIT
         edge = self.path[node_id]
         assert edge is not None
         min_parent_time = self.time[0] + 1
@@ -333,46 +379,40 @@ class TreeSequenceBuilder(object):
         assert min_parent_time >= 0
         assert min_parent_time <= self.time[0]
         # print("min_parent_time = ", min_parent_time)
-        self.time[node_id] = min_parent_time - 0.1
+        self.time[node_id] = min_parent_time - 0.5
 
-    def remap_synthetic(self, child_id, matches):
-        """
-        Remap the edges in the set of matches to point to the already existing
-        synthethic node.
-        """
-        for new, old in matches:
-            if old.child == child_id:
-                new.parent = child_id
-
-    def create_synthetic_node(self, child_id, matches):
+    def create_synthetic_node(self, matches):
         # If we have more than one edge matching to a given path, then we create
         # synthetic ancestor for this path.
         # Create a new node for this synthetic ancestor.
-        synthetic_node = self.add_node(-1, is_sample=False)
+        synthetic_node = self.add_node(-1, is_sample=False, is_synthetic=True)
         synthetic_head = None
         synthetic_prev = None
-        # print("NEW SYNTHETIC FOR ", child_id)
+        child_id = matches[0][1].child
+        # print("NEW SYNTHETIC FOR ", child_id, "=", synthetic_node)
         # print("BEFORE")
         # self.print_chain(self.path[child_id])
         for new, old in matches:
-            if old.child == child_id:
-                # print("\t", new, "\t", old)
-                synthetic_edge = Edge(
-                    old.left, old.right, old.parent, synthetic_node)
-                if synthetic_prev is not None:
-                    synthetic_prev.next = synthetic_edge
-                if synthetic_head is None:
-                    synthetic_head = synthetic_edge
-                synthetic_prev = synthetic_edge
-                new.parent = synthetic_node
-                self.unindex_edge(old)
-                # We are modifying this existing edge, so remove it from the
-                # index. Also mark it as unindexed by setting the child_id to -1.
-                # We check for this in squash_edges_indexed and make sure it
-                # is indexed afterwards.
-                old.parent = synthetic_node
-                old.child = -1
-        # print("END of match loop")
+            # print("\t", old)
+            # print("\t", new, "\t", old)
+            assert new.left == old.left
+            assert new.right == old.right
+            assert new.parent == old.parent
+            synthetic_edge = Edge(old.left, old.right, old.parent, synthetic_node)
+            if synthetic_prev is not None:
+                synthetic_prev.next = synthetic_edge
+            if synthetic_head is None:
+                synthetic_head = synthetic_edge
+            synthetic_prev = synthetic_edge
+            new.parent = synthetic_node
+            # We are modifying this existing edge, so remove it from the
+            # index. Also mark it as unindexed by setting the child_id to -1.
+            # We check for this in squash_edges_indexed and make sure it
+            # is indexed afterwards.
+            self.unindex_edge(old)
+            old.parent = synthetic_node
+            old.child = -1
+
         self.path[synthetic_node] = self.squash_edges(synthetic_head)
         self.path[child_id] = self.squash_edges_indexed(self.path[child_id], child_id)
         self.update_node_time(synthetic_node)
@@ -380,7 +420,6 @@ class TreeSequenceBuilder(object):
         # print("AFTER")
         # self.print_chain(synthetic_head)
         # self.print_chain(self.path[child_id])
-        # self.print_chain(head)
 
     def compress_path(self, head):
         """
@@ -389,7 +428,11 @@ class TreeSequenceBuilder(object):
         """
         # print("Compress for child:", head.child)
         edge = head
+        # Find all edges in the index that have the same (left, right, parent)
+        # values as edges in the edge path for this child.
         matches = []
+        contig_offsets = []
+        last_match = msprime.Edge(-1, -1, -1, -1)
         while edge is not None:
             # print("\tConsidering ", edge.left, edge.right, edge.parent)
             key = (edge.left, edge.right, edge.parent, -1)
@@ -399,18 +442,46 @@ class TreeSequenceBuilder(object):
                             edge.left, edge.right, edge.parent):
                 match = self.path_index.peekitem(index)[1]
                 matches.append((edge, match))
+                condition = (
+                    edge.left == last_match.right and
+                    match.child == last_match.child)
+                if not condition:
+                    contig_offsets.append(len(matches) - 1)
+                last_match = match
             edge = edge.next
+        contig_offsets.append(len(matches))
 
-        matched_children_count = collections.Counter()
+        # FIXME This is just to check the contig finding code above. Remove.
+        contiguous_matches = [[(None, msprime.Edge(-1, -1, -1, -1))]]  # Sentinel
         for edge, match in matches:
-            matched_children_count[match.child] += 1
+            condition = (
+                edge.left == contiguous_matches[-1][-1][1].right and
+                match.child == contiguous_matches[-1][-1][1].child)
+            if condition:
+                contiguous_matches[-1].append((edge, match))
+            else:
+                contiguous_matches.append([(edge, match)])
+        other_matches = [None]
+        for j in range(len(contig_offsets) - 1):
+            contigs = matches[contig_offsets[j]: contig_offsets[j + 1]]
+            other_matches.append(contigs)
+        assert len(other_matches) == len(contiguous_matches)
+        for c1, c2 in zip(contiguous_matches[1:], other_matches[1:]):
+            assert c1 == c2
 
-        for child_id, count in matched_children_count.items():
-            if count > 1:
-                if self.flags[child_id] == 0:
-                    self.remap_synthetic(child_id, matches)
+        for j in range(len(contig_offsets) - 1):
+            match_list = matches[contig_offsets[j]: contig_offsets[j + 1]]
+            if len(match_list) > 1:
+                child_id = match_list[0][1].child
+                # print("MATCH:", child_id)
+                if self.flags[child_id] == constants.SYNTHETIC_NODE_BIT:
+                    # print("EXISTING SYNTHETIC")
+                    for edge, match in match_list:
+                        # print("\t", edge, match)
+                        edge.parent = child_id
                 else:
-                    self.create_synthetic_node(child_id, matches)
+                    # print("NEW SYNTHETIC")
+                    self.create_synthetic_node(match_list)
         return self.squash_edges(head)
 
     def restore_mutations(self, site, node, derived_state, parent):
@@ -861,8 +932,8 @@ class AncestorMatcher(object):
         k = M - 1
         # Construct the matched haplotype
         match[:] = 0
-        match[:start] = UNKNOWN_ALLELE
-        match[end:] = UNKNOWN_ALLELE
+        match[:start] = constants.UNKNOWN_ALLELE
+        match[end:] = constants.UNKNOWN_ALLELE
         # Reset the tree.
         self.parent[:] = -1
         self.left_child[:] = -1
