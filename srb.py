@@ -50,6 +50,7 @@ def new_simplify(ts, *args, **kwargs):
        metadata=tmp_tables.nodes.metadata,
        metadata_offset=tmp_tables.nodes.metadata_offset)
     return old_simplify(tmp_tables.tree_sequence(), *args, **kwargs)
+
 msprime.TreeSequence.simplify = new_simplify
 
 
@@ -90,9 +91,9 @@ def generate_samples(ts, error_p):
     return S.T
 
 Edge_to_parent = collections.namedtuple("Edge_to_parent", "parent_id left right")
-SRB_data = collections.namedtuple("SRB_data", "pos left_parent right_parent")
 
 def identify_SRBs(ts):
+    SRB_data = collections.namedtuple("SRB_data", "pos left_parent right_parent")
     breakpoints = collections.defaultdict(set)
     for (left, right), edges_out, edges_in in ts.edge_diffs():
         if len(edges_out) and len(edges_in):
@@ -108,6 +109,55 @@ def identify_SRBs(ts):
     # shared breakpoints have at least 2 children
     return {k:v for k,v in breakpoints.items() if len(v) > 1}
 
+
+def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent):
+    """
+    Make a new node and insert it as a replacement into the child_to_parent list
+    Return a tuple of the number of edges deleted and created
+    NB: to avoid collision with existing sample nodes, we should refer to these
+    newly created nodes by a *negative* number
+    """
+    # find leftmost span of l parent and rightmost of r parent
+    # this assumes contiguous edges on a parent
+    for p in (SRB.left_parent, SRB.right_parent):
+        for i in range(len(child_to_parent[p])-1):
+            assert child_to_parent[p][i].right == child_to_parent[p][i+1].left
+    l_parent_lft = child_to_parent[SRB.left_parent][0].left 
+    r_parent_rgt = child_to_parent[SRB.right_parent][-1].right
+    #insert as replacement
+    assert new_id != SRB.left_parent
+    assert new_id != SRB.right_parent
+    child_to_parent[new_id] = [
+        Edge_to_parent(parent_id=SRB.left_parent, left=l_parent_lft, right=SRB.pos),
+        Edge_to_parent(parent_id=SRB.right_parent, left=SRB.pos, right=r_parent_rgt)]
+    edges_inserted = 2
+    
+    # relabel existing children to point to this new parent either side of the
+    # breakpoint
+    edges_deleted = 0
+    for child in SRB_children:
+        #print(" SRB in child {}".format(child))
+        found = False
+        edges = child_to_parent[child]
+        i=0
+        while i < (len(edges)-1):
+            assert new_id != child
+            if (edges[i].right == SRB.pos and 
+                edges[i+1].left == SRB.pos): #we know this must be shared
+                
+                print("Inserting single edge [{},{}) from child {} to parent {}".format(
+                    edges[i].left, edges[i+1].right, child, new_id))
+                edges[i] = Edge_to_parent(
+                    new_id, edges[i].left, edges[i+1].right)
+                del edges[i+1]
+                edges_deleted += 1
+                found = True
+            i+=1
+        if not found:
+            print("Cannot find breakpoint in child {}".format(child))
+            print("Should be at {}".format(child))
+            assert False
+    return edges_inserted, edges_deleted
 
 def tsinfer_dev(
         n, L, seed, num_threads=1, recombination_rate=1e-8,
@@ -146,105 +196,154 @@ def tsinfer_dev(
         sample_data, ancestors_ts, engine=engine, simplify=False,
         path_compression=use_built_in_path_compression, extended_checks=True)
 
-
-    max_iterations = 1000
-    for iteration in range(max_iterations):
-        SRBs = identify_SRBs(full_ts)
-        print("SRB count at start of iteration {}".format(iteration))
-        # print how many SRBs we have
-        ct = np.array([len(bp) for bp in SRBs.values()], dtype=np.int)
-        print(
-            ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1])
-            + " -- Number of edges in ts = {} ({} simplified)".format(
-                full_ts.num_edges, full_ts.simplify().num_edges))
-        if len(SRBs) == 0:
-            break
-        # sort so that we hit the most frequent SRBs first
-        sorted_SRB_keys = sorted(list(SRBs.keys()), key=lambda x:len(SRBs[x]), reverse=True)
-        
-        # we need to get edges off the full table so that we can spot SRBs between
-        # samples and ancestors, and then insert a new ancestor where possible, but
-        # we then throw away the samples to create a new ancestors TS
+    SRBs = identify_SRBs(full_ts)
+    print("SRB count at start")
+    # print how many SRBs we have
+    ct = np.array([len(bp) for bp in SRBs.values()], dtype=np.int)
+    edgecount = full_ts.num_edges, full_ts.simplify().num_edges
+    print(
+        ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1 and n>0])
+        + " -- Number of edges in ts = {} ({} simplified)".format(*edgecount))
+    # sort so that we hit the most frequent SRBs first
+    sorted_SRB_keys = sorted(list(SRBs.keys()), key=lambda x:len(SRBs[x]), reverse=True)
+    
+    for it_target in [38]:
         tables = full_ts.dump_tables()
-        node_times = {i:n.time for i, n in enumerate(tables.nodes)}
-
+        samples = set()
+        # make a new structure indexed by child rather than by parent
+        # we need to keep track of samples too, as the parents of samples need to be
+        # passed up
         child_to_parent = collections.defaultdict(list)
-        #make a new structure indexed by child rather than by parent
-        for e in full_ts.edges():
+        for e in tables.edges:
             child_to_parent[e.child].append(Edge_to_parent(e.parent,e.left, e.right))
         for child, arr in child_to_parent.items():
             arr.sort(key=operator.attrgetter('left'))
+        for i, n in enumerate(tables.nodes):
+            if n.flags & msprime.NODE_IS_SAMPLE:
+                samples.add(i)       
+        print("Samples", samples)
+        
+        tables = ancestors_ts.dump_tables()
+        internal_node_times = {i:n.time for i, n in enumerate(tables.nodes)}
     
         #allocate a new ancestor for every shared breakpoint site        
-        delta=0.0001
-        edges_inserted = edges_deleted = 0
-        for b in sorted_SRB_keys:
-            #make a new node
-            youngest_parent_time = min(node_times[b.left_parent],node_times[b.right_parent])
+        delta=0.0000000001 #must be smaller than the delt used in path compression
+        edges_differences = np.zeros(2, dtype=np.int) #count inserted, deleted
+        for it, SRB in enumerate(sorted_SRB_keys):
+            youngest_parent_time = min(
+                internal_node_times[SRB.left_parent],
+                internal_node_times[SRB.right_parent])
             new_time = youngest_parent_time-delta
-            new_id = tables.nodes.add_row(time=new_time, flags = tsinfer.SYNTHETIC_NODE_BIT)
-            #print("Inserted new node", new_id, new_time)
-            node_times[new_id] = new_time
-            # find leftmost span of l parent and rightmost of r parent
-            # this assumes contiguous edges on a parent
-            for p in (b.left_parent, b.right_parent):
-                for i in range(len(child_to_parent[p])-1):
-                    assert child_to_parent[p][i].right == child_to_parent[p][i+1].left
-            l_parent_lft = child_to_parent[b.left_parent][0].left 
-            r_parent_rgt = child_to_parent[b.right_parent][-1].right
-            #insert as replacement
-            assert new_id != b.left_parent
-            assert new_id != b.right_parent
-            child_to_parent[new_id] = [
-                Edge_to_parent(parent_id=b.left_parent, left=l_parent_lft, right=b.pos),
-                Edge_to_parent(parent_id=b.right_parent, left=b.pos, right=r_parent_rgt)]
-            edges_inserted += 2
-
-            # relabel existing children to point to this new parent either side of the
-            # breakpoint
-                        
-            for child in SRBs[b]:
-                #print(" SRB in child {}".format(child))
-                found = False
-                edges = child_to_parent[child]
-                i=0
-                while i < (len(edges)-1):
-                    assert new_id != child
-                    if (edges[i].right == b.pos and 
-                        edges[i+1].left == b.pos): #we know this must be shared
-                        
-                        #print("Inserting single edge [{},{}) from child {} to parent {}".format(
-                        #    edges[i].left, edges[i+1].right, child, new_id))
-                        edges[i] = Edge_to_parent(
-                            new_id, edges[i].left, edges[i+1].right)
-                        del edges[i+1]
-                        edges_deleted += 1
-                        found = True
-                    i+=1
-                if not found:
-                    print("Cannot find breakpoint in child {}".format(child))
-                    print("Should be at {}".format(child))
-                    assert False
-        # everything should be inserted: remake the ancestors table by 
+            new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
+            internal_node_times[new_id] = new_time
+            print("Inserted new node", new_id, "@", new_time)
+            SRB_children = SRBs[SRB]
+            edges_differences += SRB_replace_edges(
+                new_id, youngest_parent_time, SRB, SRB_children, child_to_parent)
+            
+            if it == it_target:
+                print(SRB, SRB_children)
+                break
+                            
+        # remake the ancestors table, but don't use the samples: we will match them up later
         tables.edges.clear()
         for c, edges in child_to_parent.items():
-            for e in edges: 
-                try:
-                    assert e.parent_id != c
-                    assert node_times[e.parent_id] > node_times[c]
-                except:
-                    print(e.parent_id, c, node_times[e.parent_id], node_times[c])
-                    raise
-                tables.edges.add_row(left=e.left, right=e.right, parent=e.parent_id, child=c)
+            if c in samples:
+                #print("omitting edges from child {}".format(c))
+                pass
+            else:
+                #print("Saving edges from child {}".format(c))
+            
+                for e in edges:
+                    try:
+                        assert e.parent_id != c
+                        assert internal_node_times[e.parent_id] > internal_node_times[c]
+                    except:
+                        print(
+                            "Parent {}@{}, child {}@{}".format(e.parent_id,
+                                internal_node_times[e.parent_id], c, internal_node_times[c]))
+                        raise
+                    tables.edges.add_row(
+                        left=e.left, right=e.right, parent=abs(e.parent_id), child=abs(c))
         
         tables.sort()
-        print("{} edges inserted, {} edges deleted".format(edges_inserted, edges_deleted))
-        full_ts = tables.tree_sequence()
-        #ancestors_ts = tables.tree_sequence()
-        #full_ts = tsinfer.match_samples(
-        #    sample_data, ancestors_ts, engine=engine, simplify=False,
-        #    path_compression=use_built_in_path_compression, extended_checks=True)
+        print("{} edges inserted / deleted".format(edges_differences))
 
+        ancestors_ts2 = tables.tree_sequence()
+
+        print("new ancestors tree seq made")    
+
+
+        child_to_parent = collections.defaultdict(list)
+        for e in tables.edges:
+            child_to_parent[e.child].append(Edge_to_parent(e.parent,e.left, e.right))
+        for child, arr in child_to_parent.items():
+            arr.sort(key=operator.attrgetter('left'))
+        for i, n in enumerate(tables.nodes):
+            if n.flags & msprime.NODE_IS_SAMPLE:
+                samples.add(i)       
+        internal_node_times = {i:n.time for i, n in enumerate(tables.nodes)}
+
+        SRB = sorted_SRB_keys[39]
+        youngest_parent_time = min(
+            internal_node_times[SRB.left_parent],
+            internal_node_times[SRB.right_parent])
+        new_time = youngest_parent_time-delta
+        new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
+        internal_node_times[new_id] = new_time
+        print("Inserted new node", new_id, "@", new_time, 
+        "( parents:", SRB.left_parent, SRB.right_parent, ")")
+        
+        SRB_children = SRBs[SRB]
+        print("Children at times", {c:internal_node_times[c] for c in SRB_children})
+        edges_differences += SRB_replace_edges(
+            new_id, youngest_parent_time, SRB, SRB_children, child_to_parent)
+
+        
+        # remake the ancestors table, but don't use the samples: we will match them up later
+        tables.edges.clear()
+        for c, edges in child_to_parent.items():
+            if c in samples:
+                print("omitting edges from child {}".format(c))
+                pass
+            else:
+                print("Saving edges from child {}".format(c))
+            
+                for e in edges:
+                    try:
+                        assert e.parent_id != c
+                        assert internal_node_times[e.parent_id] > internal_node_times[c]
+                    except:
+                        print(
+                            "Parent {}@{}, child {}@{}".format(e.parent_id,
+                                internal_node_times[e.parent_id], c, internal_node_times[c]))
+                        raise
+                    tables.edges.add_row(
+                        left=e.left, right=e.right, parent=abs(e.parent_id), child=abs(c))
+
+        tables.sort()
+
+        ancestors_ts2 = tables.tree_sequence()
+
+        print("new ancestors tree seq made")    
+        full_ts2 = tsinfer.match_samples(
+            sample_data, ancestors_ts2, engine=engine, simplify=False,
+            path_compression=use_built_in_path_compression)
+
+
+    
+
+    SRBs = identify_SRBs(full_ts)
+    print("SRB count at end")
+    # print how many SRBs we have
+    ct = np.array([len(bp) for bp in SRBs.values()], dtype=np.int)
+    post_edgecount = full_ts.num_edges, full_ts.simplify().num_edges
+    print(
+        ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1])
+        + " -- Number of edges in ts = {} ({} simplified)".format(*post_edgecount))
+
+    for c, pre, post in zip(["without", "with"], edgecount, post_edgecount):
+        print("Reduction in edges {} simplification: {}".format(c, (pre-post)/pre*100))
 
     for node in ts.nodes():
         if tsinfer.is_synthetic(node.flags):
@@ -383,7 +482,10 @@ if __name__ == "__main__":
     # for j in range(1, 100):
     #     tsinfer_dev(15, 0.5, seed=j, num_threads=0, engine="P", recombination_rate=1e-8)
     # copy_1kg()
-    tsinfer_dev(100, 2, seed=4, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(5, 2, seed=4, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(4, 0.5, seed=423, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(4, 0.5, seed=2345, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(10, 2, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
 
     # minimise_dev()
 
