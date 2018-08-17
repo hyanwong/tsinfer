@@ -90,7 +90,139 @@ def generate_samples(ts, error_p):
             done = 0 < s < ts.sample_size
     return S.T
 
-Edge_to_parent = collections.namedtuple("Edge_to_parent", "parent_id left right")
+class RangeData:
+    """
+    A consecutive range of edges belonging to the same parent
+    There should be n positions and n-1 parents
+    """
+    def __init__(self):
+        self.pos_array = []
+        self.parent_array = []
+
+    @property
+    def leftmost(self):
+        return self.pos_array[0]
+
+    @property
+    def rightmost(self):
+        return self.pos_array[-1]
+
+    def left_parent(self, pos):
+        if pos == 0:
+            return self.parent_array[pos-1]
+        else:
+            return None
+
+    def right_parent(self, pos):
+        if pos < len(self.parent_array):
+            return self.parent_array[pos]
+        else:
+            return None
+
+    def contains(self, position):
+        """
+        Does this range contain this position. We deliberately allow both ends open
+        as we will sometimes want to obtain the leftmost pos for a breakpoint which 
+        occurs exactly at the rightmost position
+        """
+        return self.leftmost <= position <= self.rightmost
+
+    def delete_intermediate_position(self, pos_idx, new_left_and_right_parent):
+        assert pos_idx > 0 # must be intermediate
+        assert pos_idx < len(self.parent_array), (pos_idx, len(self.parent_array))  # must be intermediate
+        del self.pos_array[pos_idx]
+        del self.parent_array[pos_idx]
+        self.parent_array[pos_idx-1] = new_left_and_right_parent
+
+class ChildData:
+    """
+    Store a list of consecutive ranges, and a dict mapping positions into those ranges.
+    We need to:
+    a) get the rightmost and leftmost position in this range
+    b) delete a position (and replace the right and left parents with a new one)
+    c) get the current left and right parent for a specific position
+    d) insert an edge, 
+    """
+    def __init__(self, left=None, middle=None, right=None, parent1=None, parent2=None):
+        """
+        Can either be constructed with no args, to give a blank child, or with a pair 
+        of consecutive edges
+        """
+        self.temp_edges = []
+        self.ranges = [] # a list of RangeData objects
+        if left!=None:
+            self.ranges += [RangeData()]
+            self.ranges[0].pos_array += [left, middle, right]
+            self.ranges[0].parent_array += [parent1, parent2]
+        
+        
+    def delete_position(self, position, new_left_and_right_parent):
+        """
+        This should not allow us to delete positions at either end of a range,
+        so we should not be able to change the length of ranges
+        """
+        assert len(self.ranges)
+        for r in self.ranges:
+            try:
+                del_pos = r.pos_array.index(position)
+                r.delete_intermediate_position(del_pos, new_left_and_right_parent)
+                return 1
+            except ValueError:
+                continue
+        assert False, "No such position in any range"
+                
+    def left_right_parents(self, position):
+        assert len(self.ranges)
+        for r in self.ranges:
+            try:
+                pos = r.pos_array.index(position)
+                return r.left_parent(pos), r.right_parent(pos)
+            except ValueError:
+                continue
+        assert False, "No such position in any range"
+
+    def rightmost_from(self, position):
+        assert len(self.ranges)
+        for r in self.ranges:
+            if r.contains(position):
+               return r.rightmost
+        assert False, "Position {} not in any range".format(position)
+
+    def leftmost_from(self, position):
+        assert len(self.ranges)
+        for r in self.ranges:
+            if r.contains(position):
+                return r.leftmost
+        assert False, "Position {} not in any range: {}".format(position,
+            [r.pos_array for r in self.ranges])
+
+        
+    def add_edge(self, left, right, parent_id):
+        """
+        Add an edge, potentially out of order. Call make_ranges() before using
+        """
+        assert len(self.ranges) == 0 #should only be used to initialize the edges
+        self.temp_edges.append((left, right, parent_id))
+
+    def make_ranges(self):
+        """
+        Once we have added a set of edges, this will determine how to cut them into 
+        contiguous ranges
+        """
+        self.temp_edges.sort(key=operator.itemgetter(0))
+        prev_right=None
+        for left, right, parent_id in self.temp_edges:
+            if left!=prev_right:
+                #make a new range
+                self.ranges.append(RangeData())
+                self.ranges[-1].pos_array.append(left)
+            self.ranges[-1].pos_array.append(right)
+            self.ranges[-1].parent_array.append(parent_id)
+            prev_right = right
+        for r in self.ranges:
+            assert len(r.pos_array)-1 == len(r.parent_array), \
+                (len(r.pos_array), len(r.parent_array))
+        self.temp_edges = [] #clear memory
 
 def identify_SRBs(ts):
     SRB_data = collections.namedtuple("SRB_data", "pos left_parent right_parent")
@@ -110,53 +242,36 @@ def identify_SRBs(ts):
     return {k:v for k,v in breakpoints.items() if len(v) > 1}
 
 
-def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent):
+def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent, verbosity=0):
     """
-    Make a new node and insert it as a replacement into the child_to_parent list
+    Insert 2 edges pointing to a new id into the child_to_parent list, and 
+    delete the existing SRB, replacing it with a single edge pointing to the
+    newly created edges.
     Return a tuple of the number of edges deleted and created
-    NB: to avoid collision with existing sample nodes, we should refer to these
-    newly created nodes by a *negative* number
     """
     # find leftmost span of l parent and rightmost of r parent
     # this assumes contiguous edges on a parent
-    for p in (SRB.left_parent, SRB.right_parent):
-        for i in range(len(child_to_parent[p])-1):
-            assert child_to_parent[p][i].right == child_to_parent[p][i+1].left
-    l_parent_lft = child_to_parent[SRB.left_parent][0].left 
-    r_parent_rgt = child_to_parent[SRB.right_parent][-1].right
+    l_parent_lft = child_to_parent[SRB.left_parent].leftmost_from(SRB.pos)
+    r_parent_rgt = child_to_parent[SRB.right_parent].rightmost_from(SRB.pos)
     #insert as replacement
     assert new_id != SRB.left_parent
     assert new_id != SRB.right_parent
-    child_to_parent[new_id] = [
-        Edge_to_parent(parent_id=SRB.left_parent, left=l_parent_lft, right=SRB.pos),
-        Edge_to_parent(parent_id=SRB.right_parent, left=SRB.pos, right=r_parent_rgt)]
+    child_to_parent[new_id] = ChildData(
+        l_parent_lft, SRB.pos, r_parent_rgt, SRB.left_parent, SRB.right_parent)
     edges_inserted = 2
+    if verbosity:
+        print("Inserted edge from child", new_id, "to parent", SRB.left_parent, 
+            ". Location: [{}, {})".format(l_parent_lft, SRB.pos))
+        print("Inserted edge from child", new_id, "to parent", SRB.right_parent, 
+            ". Location: [{}, {})".format(SRB.pos, r_parent_rgt))
     
     # relabel existing children to point to this new parent either side of the
     # breakpoint
     edges_deleted = 0
     for child in SRB_children:
-        #print(" SRB in child {}".format(child))
-        found = False
-        edges = child_to_parent[child]
-        i=0
-        while i < (len(edges)-1):
-            assert new_id != child
-            if (edges[i].right == SRB.pos and 
-                edges[i+1].left == SRB.pos): #we know this must be shared
-                
-                print("Inserting single edge [{},{}) from child {} to parent {}".format(
-                    edges[i].left, edges[i+1].right, child, new_id))
-                edges[i] = Edge_to_parent(
-                    new_id, edges[i].left, edges[i+1].right)
-                del edges[i+1]
-                edges_deleted += 1
-                found = True
-            i+=1
-        if not found:
-            print("Cannot find breakpoint in child {}".format(child))
-            print("Should be at {}".format(child))
-            assert False
+        edges_deleted += child_to_parent[child].delete_position(SRB.pos, new_id)
+        if verbosity:
+            print("Deleting position {} by merging two edges in child {}".format(SRB.pos, child))
     return edges_inserted, edges_deleted
 
 def tsinfer_dev(
@@ -186,15 +301,21 @@ def tsinfer_dev(
         sample_data, engine=engine, num_threads=num_threads)
     ancestors_ts = tsinfer.match_ancestors(
         sample_data, ancestor_data, engine=engine, 
-        path_compression=True, extended_checks=True)
+        path_compression=use_built_in_path_compression, extended_checks=True)
 
     # Do not simplify the ancestors, since (1) we will not be able to map parents
     #  back to ancestors in the original ancestors_ts, and (2) we may lose where in the 
     #  timeslices to put the new ancestors. OTOH, we may miss some SRBs, if parents are 
     #  different between children
+    # Additionally, we can't use path compression here, as it will create more ancestors
+    full_ts_pc = tsinfer.match_samples(
+        sample_data, ancestors_ts, engine=engine, simplify=True,
+        path_compression=True, extended_checks=True)
+
+
     full_ts = tsinfer.match_samples(
         sample_data, ancestors_ts, engine=engine, simplify=False,
-        path_compression=use_built_in_path_compression, extended_checks=True)
+        path_compression=False, extended_checks=True)
 
     SRBs = identify_SRBs(full_ts)
     print("SRB count at start")
@@ -203,132 +324,87 @@ def tsinfer_dev(
     edgecount = full_ts.num_edges, full_ts.simplify().num_edges
     print(
         ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1 and n>0])
-        + " -- Number of edges in ts = {} ({} simplified)".format(*edgecount))
+        + " -- N edges in ts = {} ({} simplified, ".format(*edgecount)
+        + "{} with path compression on samples".format(full_ts_pc.num_edges))
     # sort so that we hit the most frequent SRBs first
     sorted_SRB_keys = sorted(list(SRBs.keys()), key=lambda x:len(SRBs[x]), reverse=True)
     
-    for it_target in [38]:
-        tables = full_ts.dump_tables()
-        samples = set()
-        # make a new structure indexed by child rather than by parent
-        # we need to keep track of samples too, as the parents of samples need to be
-        # passed up
-        child_to_parent = collections.defaultdict(list)
-        for e in tables.edges:
-            child_to_parent[e.child].append(Edge_to_parent(e.parent,e.left, e.right))
-        for child, arr in child_to_parent.items():
-            arr.sort(key=operator.attrgetter('left'))
-        for i, n in enumerate(tables.nodes):
-            if n.flags & msprime.NODE_IS_SAMPLE:
-                samples.add(i)       
-        print("Samples", samples)
-        
-        tables = ancestors_ts.dump_tables()
-        internal_node_times = {i:n.time for i, n in enumerate(tables.nodes)}
+    tables = full_ts.dump_tables()
+    samples = set()
+    # make a new structure indexed by child rather than by parent
+    # we need to keep track of samples too, as the parents of samples need to be
+    # passed up
+    child_to_parent = collections.defaultdict(ChildData)
+    internal_node_times = {}
+    for e in tables.edges:
+        child_to_parent[e.child].add_edge(e.left, e.right, e.parent)
+    for arr in child_to_parent.values():
+        arr.make_ranges()
+    for i, n in enumerate(tables.nodes):
+        if n.flags & msprime.NODE_IS_SAMPLE:
+            samples.add(i)
+        else:
+            internal_node_times[i] = n.time
+    print("Samples", samples)
     
-        #allocate a new ancestor for every shared breakpoint site        
-        delta=0.0000000001 #must be smaller than the delt used in path compression
-        edges_differences = np.zeros(2, dtype=np.int) #count inserted, deleted
-        for it, SRB in enumerate(sorted_SRB_keys):
+    #here we revert to the ancestors TS so that we can
+    tables = ancestors_ts.dump_tables()
+    #internal_node_times = {i:n.time for i,n in enumerate(tables.nodes)}
+
+    #allocate a new ancestor for every shared breakpoint site        
+    delta=0.0000000001 #must be smaller than the delt used in path compression
+    edges_differences = np.zeros(2, dtype=np.int) #count inserted, deleted
+    for it, SRB in enumerate(sorted_SRB_keys):
+        SRB_children = SRBs[SRB]
+        try:
             youngest_parent_time = min(
                 internal_node_times[SRB.left_parent],
                 internal_node_times[SRB.right_parent])
-            new_time = youngest_parent_time-delta
-            new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
-            internal_node_times[new_id] = new_time
-            print("Inserted new node", new_id, "@", new_time)
-            SRB_children = SRBs[SRB]
-            edges_differences += SRB_replace_edges(
-                new_id, youngest_parent_time, SRB, SRB_children, child_to_parent)
-            
-            if it == it_target:
-                print(SRB, SRB_children)
-                break
-                            
-        # remake the ancestors table, but don't use the samples: we will match them up later
-        tables.edges.clear()
-        for c, edges in child_to_parent.items():
-            if c in samples:
-                #print("omitting edges from child {}".format(c))
-                pass
-            else:
-                #print("Saving edges from child {}".format(c))
-            
-                for e in edges:
-                    try:
-                        assert e.parent_id != c
-                        assert internal_node_times[e.parent_id] > internal_node_times[c]
-                    except:
-                        print(
-                            "Parent {}@{}, child {}@{}".format(e.parent_id,
-                                internal_node_times[e.parent_id], c, internal_node_times[c]))
-                        raise
-                    tables.edges.add_row(
-                        left=e.left, right=e.right, parent=abs(e.parent_id), child=abs(c))
-        
-        tables.sort()
-        print("{} edges inserted / deleted".format(edges_differences))
-
-        ancestors_ts2 = tables.tree_sequence()
-
-        print("new ancestors tree seq made")    
-
-
-        child_to_parent = collections.defaultdict(list)
-        for e in tables.edges:
-            child_to_parent[e.child].append(Edge_to_parent(e.parent,e.left, e.right))
-        for child, arr in child_to_parent.items():
-            arr.sort(key=operator.attrgetter('left'))
-        for i, n in enumerate(tables.nodes):
-            if n.flags & msprime.NODE_IS_SAMPLE:
-                samples.add(i)       
-        internal_node_times = {i:n.time for i, n in enumerate(tables.nodes)}
-
-        SRB = sorted_SRB_keys[39]
-        youngest_parent_time = min(
-            internal_node_times[SRB.left_parent],
-            internal_node_times[SRB.right_parent])
+        except KeyError:
+            print("Data for SRB", SRB, "with children", SRB_children, internal_node_times)
+            raise
         new_time = youngest_parent_time-delta
+        #NB: to avoid collision with existing sample nodes, we should refer to these
+        #newly created nodes by a *negative* number
         new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
         internal_node_times[new_id] = new_time
-        print("Inserted new node", new_id, "@", new_time, 
-        "( parents:", SRB.left_parent, SRB.right_parent, ")")
-        
-        SRB_children = SRBs[SRB]
-        print("Children at times", {c:internal_node_times[c] for c in SRB_children})
+        #print("Inserted new node", new_id, "@", new_time)
         edges_differences += SRB_replace_edges(
             new_id, youngest_parent_time, SRB, SRB_children, child_to_parent)
-
         
-        # remake the ancestors table, but don't use the samples: we will match them up later
-        tables.edges.clear()
-        for c, edges in child_to_parent.items():
-            if c in samples:
-                print("omitting edges from child {}".format(c))
-                pass
-            else:
-                print("Saving edges from child {}".format(c))
-            
-                for e in edges:
+
+    
+    # remake the ancestors table, but don't use the samples: we will match them up later
+    tables.edges.clear()
+    for c, data in child_to_parent.items():
+        if c in samples:
+            #print("omitting edges from child {}".format(c))
+            pass
+        else:
+            #print("Saving edges from child {}".format(c))
+            for r in data.ranges:
+                for i, parent_id in enumerate(r.parent_array):
                     try:
-                        assert e.parent_id != c
-                        assert internal_node_times[e.parent_id] > internal_node_times[c]
+                        assert parent_id != c
+                        assert internal_node_times[parent_id] > internal_node_times[c]
                     except:
                         print(
-                            "Parent {}@{}, child {}@{}".format(e.parent_id,
-                                internal_node_times[e.parent_id], c, internal_node_times[c]))
+                            "Parent {}@{}, child {}@{}".format(parent_id,
+                                internal_node_times[parent_id], c, internal_node_times[c]))
                         raise
-                    tables.edges.add_row(
-                        left=e.left, right=e.right, parent=abs(e.parent_id), child=abs(c))
+                tables.edges.add_row(
+                    left=r.pos_array[i], right=r.pos_array[i+1], 
+                    parent=abs(parent_id), child=abs(c))
 
-        tables.sort()
+    tables.sort()
 
-        ancestors_ts2 = tables.tree_sequence()
+    ancestors_ts = tables.tree_sequence()
 
-        print("new ancestors tree seq made")    
-        full_ts2 = tsinfer.match_samples(
-            sample_data, ancestors_ts2, engine=engine, simplify=False,
-            path_compression=use_built_in_path_compression)
+    print("new ancestors tree sequence made")    
+    full_ts = tsinfer.match_samples(
+        sample_data, ancestors_ts, simplify=False,
+        engine="P",
+        path_compression=use_built_in_path_compression)
 
 
     
@@ -340,10 +416,11 @@ def tsinfer_dev(
     post_edgecount = full_ts.num_edges, full_ts.simplify().num_edges
     print(
         ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1])
-        + " -- Number of edges in ts = {} ({} simplified)".format(*post_edgecount))
+        + " -- N edges in ts = {} ({} simplified)".format(*post_edgecount))
 
     for c, pre, post in zip(["without", "with"], edgecount, post_edgecount):
-        print("Reduction in edges {} simplification: {}".format(c, (pre-post)/pre*100))
+        print("Reduction in edges {} simplification: {:.3f} %".format(
+            c, (pre-post)/pre*100))
 
     for node in ts.nodes():
         if tsinfer.is_synthetic(node.flags):
@@ -482,10 +559,10 @@ if __name__ == "__main__":
     # for j in range(1, 100):
     #     tsinfer_dev(15, 0.5, seed=j, num_threads=0, engine="P", recombination_rate=1e-8)
     # copy_1kg()
-    tsinfer_dev(5, 2, seed=4, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(4, 0.5, seed=423, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(4, 0.5, seed=2345, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 2, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(10, 2, seed=123, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(10, 2, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(10, 2, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(10, 2, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
 
     # minimise_dev()
 
