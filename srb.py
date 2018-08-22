@@ -327,6 +327,7 @@ def tsinfer_dev(
         + " -- N edges in ts = {} ({} simplified, ".format(*edgecount)
         + "{} with path compression on samples".format(full_ts_pc.num_edges))
     # sort so that we hit the most frequent SRBs first
+
     sorted_SRB_keys = sorted(list(SRBs.keys()), key=lambda x:len(SRBs[x]), reverse=True)
     
     tables = full_ts.dump_tables()
@@ -346,34 +347,38 @@ def tsinfer_dev(
         else:
             internal_node_times[i] = n.time
     print("Samples", samples)
-    
+
+    edgelist = list(ancestors_ts.edges())
+    edgelist.sort(key=operator.attrgetter('child', 'left'))
+    #print("\n".join([str(e) for e in edgelist]))
+    #print("\n")
+
     #here we revert to the ancestors TS so that we can
     tables = ancestors_ts.dump_tables()
     #internal_node_times = {i:n.time for i,n in enumerate(tables.nodes)}
 
-    #allocate a new ancestor for every shared breakpoint site        
-    delta=0.0000000001 #must be smaller than the delt used in path compression
-    edges_differences = np.zeros(2, dtype=np.int) #count inserted, deleted
-    for it, SRB in enumerate(sorted_SRB_keys):
-        SRB_children = SRBs[SRB]
-        try:
-            youngest_parent_time = min(
-                internal_node_times[SRB.left_parent],
-                internal_node_times[SRB.right_parent])
-        except KeyError:
-            print("Data for SRB", SRB, "with children", SRB_children, internal_node_times)
-            raise
-        new_time = youngest_parent_time-delta
-        #NB: to avoid collision with existing sample nodes, we should refer to these
-        #newly created nodes by a *negative* number
-        new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
-        internal_node_times[new_id] = new_time
-        #print("Inserted new node", new_id, "@", new_time)
-        edges_differences += SRB_replace_edges(
-            new_id, youngest_parent_time, SRB, SRB_children, child_to_parent)
-        
+    if True:
+        #allocate a new ancestor for every shared breakpoint site        
+        delta=0.0000000001 #must be smaller than the delta used in path compression
+        edges_differences = np.zeros(2, dtype=np.int) #count inserted, deleted
+        for it, SRB in enumerate(sorted_SRB_keys):
+            SRB_children = SRBs[SRB]
+            try:
+                youngest_parent_time = min(
+                    internal_node_times[SRB.left_parent],
+                    internal_node_times[SRB.right_parent])
+            except KeyError:
+                print("Data for SRB", SRB, "with children", SRB_children, internal_node_times)
+                raise
+            new_time = youngest_parent_time-delta
+            #NB: to avoid collision with existing sample nodes, we should refer to these
+            #newly created nodes by a *negative* number
+            new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
+            internal_node_times[new_id] = new_time
+            #print("Inserted new node", new_id, "@", new_time)
+            edges_differences += SRB_replace_edges(
+                new_id, youngest_parent_time, SRB, SRB_children, child_to_parent)
 
-    
     # remake the ancestors table, but don't use the samples: we will match them up later
     tables.edges.clear()
     for c, data in child_to_parent.items():
@@ -392,18 +397,33 @@ def tsinfer_dev(
                             "Parent {}@{}, child {}@{}".format(parent_id,
                                 internal_node_times[parent_id], c, internal_node_times[c]))
                         raise
-                tables.edges.add_row(
-                    left=r.pos_array[i], right=r.pos_array[i+1], 
-                    parent=abs(parent_id), child=abs(c))
-
+                    tables.edges.add_row(
+                        left=r.pos_array[i], right=r.pos_array[i+1], 
+                        parent=abs(parent_id), child=abs(c))
+    
     tables.sort()
-
     ancestors_ts = tables.tree_sequence()
+
+    edgelist = list(ancestors_ts.edges())
+    edgelist.sort(key=operator.attrgetter('child', 'left'))
+    """
+    print("\n".join([str(e) for e in edgelist]))
+    e_iter = iter(edgelist)
+    for c in sorted(child_to_parent.keys()):
+        if c not in samples:
+            for r in child_to_parent[c].ranges:
+                for p, l, r in zip(r.parent_array, r.pos_array[:-1], r.pos_array[1:]):
+                    #print(c)
+                    e = next(e_iter)
+                    assert e.left == l and e.right==r and e.parent==p and e.child==c
+    """
+
 
     print("new ancestors tree sequence made")    
     full_ts = tsinfer.match_samples(
         sample_data, ancestors_ts, simplify=False,
-        engine="P",
+        #engine="P",
+        engine="C",
         path_compression=use_built_in_path_compression)
 
 
@@ -559,10 +579,10 @@ if __name__ == "__main__":
     # for j in range(1, 100):
     #     tsinfer_dev(15, 0.5, seed=j, num_threads=0, engine="P", recombination_rate=1e-8)
     # copy_1kg()
-    #tsinfer_dev(10, 2, seed=123, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 2, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(10, 2, seed=123, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(10, 2, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
     tsinfer_dev(10, 2, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 2, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(10, 2, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
 
     # minimise_dev()
 
