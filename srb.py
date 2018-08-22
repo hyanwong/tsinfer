@@ -392,9 +392,9 @@ def tsinfer_dev(
                             "Parent {}@{}, child {}@{}".format(parent_id,
                                 internal_node_times[parent_id], c, internal_node_times[c]))
                         raise
-                tables.edges.add_row(
-                    left=r.pos_array[i], right=r.pos_array[i+1], 
-                    parent=abs(parent_id), child=abs(c))
+                    tables.edges.add_row(
+                        left=r.pos_array[i], right=r.pos_array[i+1], 
+                        parent=abs(parent_id), child=abs(c))
 
     tables.sort()
 
