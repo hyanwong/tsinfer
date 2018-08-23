@@ -410,14 +410,14 @@ def tsinfer_dev(
     edgelist.sort(key=operator.attrgetter('child', 'left'))
     print("\n".join([str(e) for e in edgelist]))
     e_iter = iter(edgelist)
-    for c in sorted(child_to_parent.keys(), key=abs):
-        if c not in samples:
-            for r in child_to_parent[c].ranges:
-                for p, l, r in zip(r.parent_array, r.pos_array[:-1], r.pos_array[1:]):
-                    print("[left={:.3f}, right={:.3f}, parent={}, child={}]".format(
-                        l, r, p, c))
-                    e = next(e_iter)
-                    #assert e.left == l and e.right==r and e.parent==p and e.child==c
+    #for c in sorted(child_to_parent.keys(), key=abs):
+    #    if c not in samples:
+    #        for r in child_to_parent[c].ranges:
+    #            for p, l, r in zip(r.parent_array, r.pos_array[:-1], r.pos_array[1:]):
+    #                print("[left={:.3f}, right={:.3f}, parent={}, child={}]".format(
+    #                    l, r, p, c))
+    #                e = next(e_iter)
+    #                #assert e.left == l and e.right==r and e.parent==p and e.child==c
 
 
     print("new ancestors tree sequence made")    
