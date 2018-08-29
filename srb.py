@@ -108,7 +108,7 @@ class RangeData:
         return self.pos_array[-1]
 
     def left_parent(self, pos):
-        if pos == 0:
+        if pos > 0:
             return self.parent_array[pos-1]
         else:
             return None
@@ -134,6 +134,8 @@ class RangeData:
         del self.parent_array[pos_idx]
         self.parent_array[pos_idx-1] = new_left_and_right_parent
 
+SRB_data = collections.namedtuple("SRB_data", "pos left_parent right_parent")
+
 class ChildData:
     """
     Store a list of consecutive ranges, and a dict mapping positions into those ranges.
@@ -156,7 +158,7 @@ class ChildData:
             self.ranges[0].parent_array += [parent1, parent2]
         
         
-    def delete_position(self, position, new_left_and_right_parent):
+    def delete_position(self, position, new_left_and_right_parent, verbosity=0):
         """
         This should not allow us to delete positions at either end of a range,
         so we should not be able to change the length of ranges
@@ -165,18 +167,25 @@ class ChildData:
         for r in self.ranges:
             try:
                 del_pos = r.pos_array.index(position)
+                if verbosity:
+                    printed_range = ["{:.3f}".format(pos) + ("" if par is None else " [{}]".format(par))
+                        for pos, par in zip(r.pos_array, r.parent_array+[None])]
+                    print("Deleting position #{} (@{}) (parents no longer {} and {}, but {}) from range\n {}".format(
+                        del_pos, r.pos_array[del_pos], 
+                        r.parent_array[del_pos-1], r.parent_array[del_pos], new_left_and_right_parent, 
+                        " ".join(printed_range)))
                 r.delete_intermediate_position(del_pos, new_left_and_right_parent)
                 return 1
             except ValueError:
                 continue
         assert False, "No such position in any range"
                 
-    def left_right_parents(self, position):
+    def get_SRB(self, position):
         assert len(self.ranges)
         for r in self.ranges:
             try:
                 pos = r.pos_array.index(position)
-                return r.left_parent(pos), r.right_parent(pos)
+                return SRB_data(position, r.left_parent(pos), r.right_parent(pos))
             except ValueError:
                 continue
         assert False, "No such position in any range"
@@ -225,7 +234,6 @@ class ChildData:
         self.temp_edges = [] #clear memory
 
 def identify_SRBs(ts):
-    SRB_data = collections.namedtuple("SRB_data", "pos left_parent right_parent")
     breakpoints = collections.defaultdict(set)
     for (left, right), edges_out, edges_in in ts.edge_diffs():
         if len(edges_out) and len(edges_in):
@@ -250,7 +258,7 @@ def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent, verbosit
     Return a tuple of the number of edges deleted and created
     """
     # find leftmost span of l parent and rightmost of r parent
-    # this assumes contiguous edges on a parent
+    # this assumes contiguous edges on a parent    
     l_parent_lft = child_to_parent[SRB.left_parent].leftmost_from(SRB.pos)
     r_parent_rgt = child_to_parent[SRB.right_parent].rightmost_from(SRB.pos)
     #insert as replacement
@@ -269,9 +277,9 @@ def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent, verbosit
     # breakpoint
     edges_deleted = 0
     for child in SRB_children:
-        edges_deleted += child_to_parent[child].delete_position(SRB.pos, new_id)
         if verbosity:
-            print("Deleting position {} by merging two edges in child {}".format(SRB.pos, child))
+            print("Deleting at position {} by merging two edges in child {}".format(SRB.pos, child))
+        edges_deleted += child_to_parent[child].delete_position(SRB.pos, new_id, verbosity)
     return edges_inserted, edges_deleted
 
 def tsinfer_dev(
@@ -318,14 +326,14 @@ def tsinfer_dev(
         path_compression=False, extended_checks=True)
 
     SRBs = identify_SRBs(full_ts)
-    print("SRB count at start")
+    print("\nSRB count at start")
     # print how many SRBs we have
     ct = np.array([len(bp) for bp in SRBs.values()], dtype=np.int)
     edgecount = full_ts.num_edges, full_ts.simplify().num_edges
     print(
         ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1 and n>0])
-        + " -- N edges in ts = {} ({} simplified, ".format(*edgecount)
-        + "{} with path compression on samples".format(full_ts_pc.num_edges))
+        + "\n -- N edges in initial ts = {} ({} simplified, ".format(*edgecount)
+        + "{} with path compression on samples)".format(full_ts_pc.num_edges))
     # sort so that we hit the most frequent SRBs first
 
     sorted_SRB_keys = sorted(list(SRBs.keys()), key=lambda x:len(SRBs[x]), reverse=True)
@@ -350,36 +358,51 @@ def tsinfer_dev(
 
     edgelist = list(ancestors_ts.edges())
     edgelist.sort(key=operator.attrgetter('child', 'left'))
-    #print("\n".join([str(e) for e in edgelist]))
+    print("\n".join([str(e) for e in edgelist]))
     #print("\n")
 
     #here we revert to the ancestors TS so that we can
     tables = ancestors_ts.dump_tables()
     #internal_node_times = {i:n.time for i,n in enumerate(tables.nodes)}
 
-    for t in ancestors_ts.trees():
-        print("== {} - {} ===".format(*t.interval))
-        print(t.draw(format="unicode"))
+    #for t in ancestors_ts.trees():
+    #    #print("== {} - {} ===".format(*t.interval))
+    #    print(t.draw(format="unicode"))
     #allocate a new ancestor for every shared breakpoint site        
     delta=0.0000000001 #must be smaller than the delta used in path compression
     edges_differences = np.zeros(2, dtype=np.int) #count inserted, deleted
     for it, SRB in enumerate(sorted_SRB_keys):
-        SRB_children = SRBs[SRB]
-        try:
-            youngest_parent_time = min(
-                internal_node_times[SRB.left_parent],
-                internal_node_times[SRB.right_parent])
-        except KeyError:
-            print("Data for SRB", SRB, "with children", SRB_children, internal_node_times)
-            raise
-        new_time = youngest_parent_time-delta
-        #NB: to avoid collision with existing sample nodes, we should refer to these
-        #newly created nodes by a *negative* number
-        new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
-        internal_node_times[new_id] = new_time
-        print("Inserted new node", new_id, "@", new_time)
-        edges_differences += SRB_replace_edges(
-            new_id, youngest_parent_time, SRB, SRB_children, child_to_parent)
+        #print("== Collapsing SRB at position {} ==".format(SRB))
+        new_SRBs = collections.defaultdict(list)
+        for child in SRBs[SRB]:
+            # Separate into SRBs with matching L & R parents 
+            # Note that the true L or R parent may not be that described by SRB.left_parent or
+            # SRB.right_parent, since the parents may have been replaced on previous
+            # passes of the algorithm, so we need to recalculate the true L & R parents, and 
+            # group them if necessary
+            new_SRB = child_to_parent[child].get_SRB(SRB.pos)
+            new_SRBs[new_SRB].append(child)
+        if len(new_SRBs) > 1:
+            print("What was a single SRB ({} with children {}) has been split into more than one: {}".format(
+                SRB, SRBs[SRB], ", ".join(["{} with children {}".format(n, c) for n, c in new_SRBs.items()])))
+            assert False
+        for new_SRB, children in new_SRBs.items():
+            if len(children) > 1:
+                try:
+                    youngest_parent_time = min(
+                        internal_node_times[new_SRB.left_parent],
+                        internal_node_times[new_SRB.right_parent])
+                except KeyError:
+                    print("Data for SRB", new_SRB, "with children", children, internal_node_times)
+                    raise
+                new_time = youngest_parent_time-delta
+                #NB: to avoid collision with existing sample nodes, we should refer to these
+                #newly created nodes by a *negative* number
+                new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
+                internal_node_times[new_id] = new_time
+                #print("Inserted new node", new_id, "@", new_time)
+                edges_differences += SRB_replace_edges(
+                    new_id, youngest_parent_time, new_SRB, children, child_to_parent, 1)
     # remake the ancestors table, but don't use the samples: we will match them up later
     tables.edges.clear()
     for c, data in child_to_parent.items():
@@ -403,12 +426,14 @@ def tsinfer_dev(
                         parent=abs(parent_id), child=abs(c))
     
     tables.sort()
+
+
     ancestors_ts = tables.tree_sequence()
 
-    print("\n".join([str(e) for e in ancestors_ts.nodes()]))
+    #print("\n".join([str(e) for e in ancestors_ts.nodes()]))
     edgelist = list(ancestors_ts.edges())
     edgelist.sort(key=operator.attrgetter('child', 'left'))
-    print("\n".join([str(e) for e in edgelist]))
+    #print("\n".join([str(e) for e in edgelist]))
     e_iter = iter(edgelist)
     #for c in sorted(child_to_parent.keys(), key=abs):
     #    if c not in samples:
@@ -419,6 +444,7 @@ def tsinfer_dev(
     #                e = next(e_iter)
     #                #assert e.left == l and e.right==r and e.parent==p and e.child==c
 
+    #print(ancestors_ts.first().draw(format="unicode"))
 
     print("new ancestors tree sequence made")    
     full_ts = tsinfer.match_samples(
@@ -437,7 +463,7 @@ def tsinfer_dev(
     post_edgecount = full_ts.num_edges, full_ts.simplify().num_edges
     print(
         ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1])
-        + " -- N edges in ts = {} ({} simplified)".format(*post_edgecount))
+        + " -- N edges in final ts = {} ({} simplified)".format(*post_edgecount))
 
     for c, pre, post in zip(["without", "with"], edgecount, post_edgecount):
         print("Reduction in edges {} simplification: {:.3f} %".format(
@@ -577,13 +603,14 @@ if __name__ == "__main__":
     # build_profile_inputs(10**4, 100)
     # build_profile_inputs(10**5, 100)
 
-    # for j in range(1, 100):
-    #     tsinfer_dev(15, 0.5, seed=j, num_threads=0, engine="P", recombination_rate=1e-8)
+    for j in range(30,31):
+        print(j)
+        tsinfer_dev(4, 0.03, seed=j, num_threads=0, engine="P", recombination_rate=1e-8)
     # copy_1kg()
-    tsinfer_dev(5, 0.1, seed=272, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 2, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 2, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 2, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(4, 0.05, seed=123, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(10, 5, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(10, 5, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(10, 5, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
 
     # minimise_dev()
 
