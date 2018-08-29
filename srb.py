@@ -1,10 +1,8 @@
 
 import random
 import os
-import h5py
 import zarr
 import sys
-import pandas as pd
 import daiquiri
 #import bsddb3
 import time
@@ -18,6 +16,8 @@ import shutil
 import pprint
 import numpy as np
 import json
+import argparse
+import logging
 
 import matplotlib as mp
 # Force matplotlib to not use any Xwindows backend.
@@ -158,7 +158,7 @@ class ChildData:
             self.ranges[0].parent_array += [parent1, parent2]
         
         
-    def delete_position(self, position, new_left_and_right_parent, verbosity=0):
+    def delete_position(self, position, new_left_and_right_parent):
         """
         This should not allow us to delete positions at either end of a range,
         so we should not be able to change the length of ranges
@@ -167,15 +167,18 @@ class ChildData:
         for r in self.ranges:
             try:
                 del_pos = r.pos_array.index(position)
-                if verbosity:
-                    printed_range = ["{:.3f}".format(pos) + ("" if par is None else " [{}]".format(par))
-                        for pos, par in zip(r.pos_array, r.parent_array+[None])]
-                    print("Deleting position #{} (@{}) (parents no longer {} and {}, but {}) from range\n {}".format(
+                logging.debug("Deleting position " 
+                    + "#{} (@{}) (parents no longer {} and {}, but {})".format(
                         del_pos, r.pos_array[del_pos], 
-                        r.parent_array[del_pos-1], r.parent_array[del_pos], new_left_and_right_parent, 
-                        " ".join(printed_range)))
+                        r.parent_array[del_pos-1], r.parent_array[del_pos], 
+                        new_left_and_right_parent)
+                    +  " ".join([
+                        "{:.3f}".format(pos)
+                        + ("" if par is None else " [{}]".format(par))
+                            for pos, par in zip(r.pos_array, r.parent_array+[None])
+                       ]))
                 r.delete_intermediate_position(del_pos, new_left_and_right_parent)
-                return 1
+                return 1 # return the number of edges deleted
             except ValueError:
                 continue
         assert False, "No such position in any range"
@@ -250,7 +253,7 @@ def identify_SRBs(ts):
     return {k:v for k,v in breakpoints.items() if len(v) > 1}
 
 
-def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent, verbosity=0):
+def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent):
     """
     Insert 2 edges pointing to a new id into the child_to_parent list, and 
     delete the existing SRB, replacing it with a single edge pointing to the
@@ -267,19 +270,18 @@ def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent, verbosit
     child_to_parent[new_id] = ChildData(
         l_parent_lft, SRB.pos, r_parent_rgt, SRB.left_parent, SRB.right_parent)
     edges_inserted = 2
-    if verbosity:
-        print("Inserted edge from child", new_id, "to parent", SRB.left_parent, 
-            ". Location: [{}, {})".format(l_parent_lft, SRB.pos))
-        print("Inserted edge from child", new_id, "to parent", SRB.right_parent, 
-            ". Location: [{}, {})".format(SRB.pos, r_parent_rgt))
+    logging.debug("Inserted child to parent edge {}->{}. Location: [{}, {})".format(
+        new_id, SRB.left_parent, l_parent_lft, SRB.pos))
+    logging.debug("Inserted child to parent edge {}->{}. Location: [{}, {})".format(
+        new_id, SRB.right_parent, SRB.pos, r_parent_rgt))
     
     # relabel existing children to point to this new parent either side of the
     # breakpoint
     edges_deleted = 0
     for child in SRB_children:
-        if verbosity:
-            print("Deleting at position {} by merging two edges in child {}".format(SRB.pos, child))
-        edges_deleted += child_to_parent[child].delete_position(SRB.pos, new_id, verbosity)
+        logging.debug("Deleting at position {} by merging two edges in child {}".format(
+            SRB.pos, child))
+        edges_deleted += child_to_parent[child].delete_position(SRB.pos, new_id)
     return edges_inserted, edges_deleted
 
 def tsinfer_dev(
@@ -297,8 +299,7 @@ def tsinfer_dev(
             n, Ne=10**4, length=L_megabases,
             recombination_rate=recombination_rate, mutation_rate=1e-8,
             random_seed=seed)
-    if debug:
-        print("num_sites = ", ts.num_sites)
+    logging.debug("num_sites = {}".format(ts.num_sites))
     assert ts.num_sites > 0
 
     use_built_in_path_compression = True
@@ -326,13 +327,16 @@ def tsinfer_dev(
         path_compression=False, extended_checks=True)
 
     SRBs = identify_SRBs(full_ts)
-    print("\nSRB count at start")
-    # print how many SRBs we have
-    ct = np.array([len(bp) for bp in SRBs.values()], dtype=np.int)
+    # record how many SRBs we have
+    ct = np.bincount(np.array([len(bp) for bp in SRBs.values()], dtype=np.int))
+    if len(ct)>2: #omit bincounts 0 and 1
+        logging.info(
+            "START: #SRBs shared between 2, 3, 4 etc haplotypes = "
+            + ", ".join(["{}:{}".format(i,n) for i,n in enumerate(ct) if i>1 and n>0]))
+    else:
+        logging.warning("START: no SRBs to remove!")
     edgecount = full_ts.num_edges, full_ts.simplify().num_edges
-    print(
-        ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1 and n>0])
-        + "\n -- N edges in initial ts = {} ({} simplified, ".format(*edgecount)
+    logging.info(" -- N edges in initial full ts = {} ({} simplified, ".format(*edgecount)
         + "{} with path compression on samples)".format(full_ts_pc.num_edges))
     # sort so that we hit the most frequent SRBs first
 
@@ -354,25 +358,21 @@ def tsinfer_dev(
             samples.add(i)
         else:
             internal_node_times[i] = n.time
-    print("Samples", samples)
+    logging.debug("Samples: {}".format(samples))
 
-    #edgelist = list(ancestors_ts.edges())
-    #edgelist.sort(key=operator.attrgetter('child', 'left'))
-    #print("\n".join([str(e) for e in edgelist]))
-    #print("\n")
     for c in sorted(child_to_parent.keys(), key=abs):
-            for r in child_to_parent[c].ranges:
-                for p, l, r in zip(r.parent_array, r.pos_array[:-1], r.pos_array[1:]):
-                    print("[left={:.3f}, right={:.3f}, parent={}, child={}]".format(
-                        l, r, p, c))
+        for r in child_to_parent[c].ranges:
+            for p, l, r in zip(r.parent_array, r.pos_array[:-1], r.pos_array[1:]):
+                logging.debug(
+                    "[left={:.3f}, right={:.3f}, parent={} child={}]".format(l, r, p, c))
 
     #here we revert to the ancestors TS so that we can
     tables = ancestors_ts.dump_tables()
     #internal_node_times = {i:n.time for i,n in enumerate(tables.nodes)}
 
-    #for t in ancestors_ts.trees():
-    #    #print("== {} - {} ===".format(*t.interval))
-    #    print(t.draw(format="unicode"))
+    for t in ancestors_ts.trees():
+        logging.debug("== {} - {} ===".format(*t.interval))
+        logging.debug(t.draw(format="unicode"))
     #allocate a new ancestor for every shared breakpoint site        
     delta=0.0000000001 #must be smaller than the delta used in path compression
     edges_differences = np.zeros(2, dtype=np.int) #count inserted, deleted
@@ -388,8 +388,11 @@ def tsinfer_dev(
             new_SRB = child_to_parent[child].get_SRB(SRB.pos)
             new_SRBs[new_SRB].append(child)
         if len(new_SRBs) > 1:
-            print("What was a single SRB ({} with children {}) has been split into more than one: {}".format(
-                SRB, SRBs[SRB], ", ".join(["{} with children {}".format(n, c) for n, c in new_SRBs.items()])))
+            logging.debug(
+                "A single SRB ({}; children {}) has split into more than one: {}".format(
+                    SRB, SRBs[SRB], 
+                    ", ".join(
+                        ["{}; children {}".format(n, c) for n,c in new_SRBs.items()])))
         for new_SRB, children in new_SRBs.items():
             if len(children) > 1:
                 try:
@@ -397,33 +400,36 @@ def tsinfer_dev(
                         internal_node_times[new_SRB.left_parent],
                         internal_node_times[new_SRB.right_parent])
                 except KeyError:
-                    print("Data for SRB", new_SRB, "with children", children, internal_node_times)
+                    logging.warning(
+                        "Couldn't find time for parents of SRB {} in {}".format(
+                            new_SRB, internal_node_times))
                     raise
                 new_time = youngest_parent_time-delta
                 #NB: to avoid collision with existing sample nodes, we should refer to these
                 #newly created nodes by a *negative* number
                 new_id = -tables.nodes.add_row(time=new_time, flags=tsinfer.SYNTHETIC_NODE_BIT)
                 internal_node_times[new_id] = new_time
-                #print("Inserted new node", new_id, "@", new_time)
+                logging.debug("Inserted new node {} @{}".format(new_id, new_time))
                 edges_differences += SRB_replace_edges(
-                    new_id, youngest_parent_time, new_SRB, children, child_to_parent, 1)
+                    new_id, youngest_parent_time, new_SRB, children, child_to_parent)
     # remake the ancestors table, but don't use the samples: we will match them up later
     tables.edges.clear()
     for c, data in child_to_parent.items():
         if c in samples:
-            #print("omitting edges from child {}".format(c))
+            logging.debug("omitting edges from child {}".format(c))
             pass
         else:
-            #print("Saving edges from child {}".format(c))
+            logging.debug("Saving edges from child {}".format(c))
             for r in data.ranges:
                 for i, parent_id in enumerate(r.parent_array):
                     try:
                         assert parent_id != c
                         assert internal_node_times[parent_id] > internal_node_times[c]
                     except:
-                        print(
-                            "Parent {}@{}, child {}@{}".format(parent_id,
-                                internal_node_times[parent_id], c, internal_node_times[c]))
+                        logging.warning(
+                            "Error for parent {}@{}, child {}@{}".format(
+                                parent_id, internal_node_times[parent_id], 
+                                c, internal_node_times[c]))
                         raise
                     tables.edges.add_row(
                         left=r.pos_array[i], right=r.pos_array[i+1], 
@@ -434,10 +440,10 @@ def tsinfer_dev(
 
     ancestors_ts = tables.tree_sequence()
 
-    #print("\n".join([str(e) for e in ancestors_ts.nodes()]))
+    #logging.debug("\n".join([str(e) for e in ancestors_ts.nodes()]))
     edgelist = list(ancestors_ts.edges())
     edgelist.sort(key=operator.attrgetter('child', 'left'))
-    print("\n" + "\n".join([str(e) for e in edgelist]))
+    logging.debug("\n" + "\n".join([str(e) for e in edgelist]))
     e_iter = iter(edgelist)
     #for c in sorted(child_to_parent.keys(), key=abs):
     #    if c not in samples:
@@ -448,7 +454,7 @@ def tsinfer_dev(
     #                e = next(e_iter)
     #                #assert e.left == l and e.right==r and e.parent==p and e.child==c
 
-    #print(ancestors_ts.first().draw(format="unicode"))
+    #logging.debug(ancestors_ts.first().draw(format="unicode"))
 
     print("new ancestors tree sequence made")    
     full_ts = tsinfer.match_samples(
@@ -461,30 +467,18 @@ def tsinfer_dev(
     
 
     SRBs = identify_SRBs(full_ts)
-    print("SRB count at end")
     # print how many SRBs we have
-    ct = np.array([len(bp) for bp in SRBs.values()], dtype=np.int)
+    ct = np.bincount(np.array([len(bp) for bp in SRBs.values()], dtype=np.int))
+    if len(ct)>2: #omit bincounts 0 and 1
+        logging.warning(
+            "END: #SRBs still shared between 2, 3, 4 etc haplotypes = "
+            + ", ".join(["{}:{}".format(i,n) for i,n in enumerate(ct) if i>1]))
     post_edgecount = full_ts.num_edges, full_ts.simplify().num_edges
-    print(
-        ", ".join(["{}:{}".format(i,n) for i,n in enumerate(np.bincount(ct)) if i>1])
-        + " -- N edges in final ts = {} ({} simplified)".format(*post_edgecount))
+    logging.info(" -- N edges in final full ts = {} ({} simplified)".format(*post_edgecount))
 
     for c, pre, post in zip(["without", "with"], edgecount, post_edgecount):
-        print("Reduction in edges {} simplification: {:.3f} %".format(
+        logging.info("Reduction in edges {} simplification: {:.3f} %".format(
             c, (pre-post)/pre*100))
-
-    for node in ts.nodes():
-        if tsinfer.is_synthetic(node.flags):
-            print("Synthetic node", node.id, node.time)
-            parent_edges = [edge for edge in ts.edges() if edge.parent == node.id]
-            child_edges = [edge for edge in ts.edges() if edge.child == node.id]
-            child_edges.sort(key=lambda e: e.left)
-            print("parent edges")
-            for edge in parent_edges:
-                print("\t", edge)
-            print("child edges")
-            for edge in child_edges:
-                print("\t", edge)
 
 def subset_sites(ts, position):
     """
@@ -593,6 +587,20 @@ def run_build():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Temporary routines for development testing")
+    parser.add_argument(
+        "--verbosity", "-v", action="count", default=0,
+        help="Verbosity level.")
+    args = parser.parse_args()
+
+    log_level = logging.WARNING
+    if args.verbosity == 1:
+        log_level = logging.INFO
+    if args.verbosity >= 2:
+        log_level = logging.DEBUG
+    logging.basicConfig(
+        format='%(message)s', level=log_level, stream=sys.stdout)
 
     # run_build()
 
@@ -607,14 +615,14 @@ if __name__ == "__main__":
     # build_profile_inputs(10**4, 100)
     # build_profile_inputs(10**5, 100)
 
-    for j in range(30,31):
-        print(j)
-        tsinfer_dev(4, 0.03, seed=j, num_threads=0, engine="P", recombination_rate=1e-8)
+    #for j in range(30,31):
+    #    print(j)
+    #    tsinfer_dev(4, 0.03, seed=j, num_threads=0, engine="C", recombination_rate=1e-8)
     # copy_1kg()
-    #tsinfer_dev(4, 0.05, seed=123, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 5, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 5, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
-    #tsinfer_dev(10, 5, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(50, 2, seed=123, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(50, 2, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(50, 2, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
+    tsinfer_dev(50, 2, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
 
     # minimise_dev()
 
