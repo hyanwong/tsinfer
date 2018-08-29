@@ -356,10 +356,15 @@ def tsinfer_dev(
             internal_node_times[i] = n.time
     print("Samples", samples)
 
-    edgelist = list(ancestors_ts.edges())
-    edgelist.sort(key=operator.attrgetter('child', 'left'))
-    print("\n".join([str(e) for e in edgelist]))
+    #edgelist = list(ancestors_ts.edges())
+    #edgelist.sort(key=operator.attrgetter('child', 'left'))
+    #print("\n".join([str(e) for e in edgelist]))
     #print("\n")
+    for c in sorted(child_to_parent.keys(), key=abs):
+            for r in child_to_parent[c].ranges:
+                for p, l, r in zip(r.parent_array, r.pos_array[:-1], r.pos_array[1:]):
+                    print("[left={:.3f}, right={:.3f}, parent={}, child={}]".format(
+                        l, r, p, c))
 
     #here we revert to the ancestors TS so that we can
     tables = ancestors_ts.dump_tables()
@@ -385,7 +390,6 @@ def tsinfer_dev(
         if len(new_SRBs) > 1:
             print("What was a single SRB ({} with children {}) has been split into more than one: {}".format(
                 SRB, SRBs[SRB], ", ".join(["{} with children {}".format(n, c) for n, c in new_SRBs.items()])))
-            assert False
         for new_SRB, children in new_SRBs.items():
             if len(children) > 1:
                 try:
@@ -433,7 +437,7 @@ def tsinfer_dev(
     #print("\n".join([str(e) for e in ancestors_ts.nodes()]))
     edgelist = list(ancestors_ts.edges())
     edgelist.sort(key=operator.attrgetter('child', 'left'))
-    #print("\n".join([str(e) for e in edgelist]))
+    print("\n" + "\n".join([str(e) for e in edgelist]))
     e_iter = iter(edgelist)
     #for c in sorted(child_to_parent.keys(), key=abs):
     #    if c not in samples:
