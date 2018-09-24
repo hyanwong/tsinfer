@@ -28,7 +28,6 @@ import seaborn as sns
 import tsinfer
 import msprime
 
-
 old_simplify = msprime.TreeSequence.simplify
 def new_simplify(ts, *args, **kwargs):
     tmp_tables = ts.dump_tables()
@@ -284,6 +283,11 @@ def SRB_replace_edges(new_id, time, SRB, SRB_children, child_to_parent):
         edges_deleted += child_to_parent[child].delete_position(SRB.pos, new_id)
     return edges_inserted, edges_deleted
 
+def print_ts(ts):
+    for tree in ts.trees():
+        print("== {} ===".format(tree.interval))
+        print(tree.draw(format="unicode"))
+
 def tsinfer_dev(
         n, L, seed, num_threads=1, recombination_rate=1e-8,
         error_rate=0, engine="C", log_level="WARNING",
@@ -301,8 +305,9 @@ def tsinfer_dev(
             random_seed=seed)
     logging.debug("num_sites = {}".format(ts.num_sites))
     assert ts.num_sites > 0
+    #print_ts(ts)
 
-    use_built_in_path_compression = True
+    use_built_in_path_compression = False
 
     sample_data = tsinfer.SampleData.from_tree_sequence(ts)
 
@@ -317,14 +322,23 @@ def tsinfer_dev(
     #  timeslices to put the new ancestors. OTOH, we may miss some SRBs, if parents are 
     #  different between children
     # Additionally, we can't use path compression here, as it will create more ancestors
+    #  than are present in ancestors_ts
     full_ts_pc = tsinfer.match_samples(
         sample_data, ancestors_ts, engine=engine, simplify=True,
         path_compression=True, extended_checks=True)
 
+    #print_ts(full_ts_pc)
+
+    
+    bp, KC = tsinfer.eval_util.compare(ts, full_ts_pc)
+    logging.info("Av KC dist = {}".format(np.sum(KC * np.diff(bp))/(np.max(bp)-np.min(bp))))
 
     full_ts = tsinfer.match_samples(
-        sample_data, ancestors_ts, engine=engine, simplify=False,
+        sample_data, ancestors_ts, engine=engine, simplify=True,
         path_compression=False, extended_checks=True)
+
+    bp, KC = tsinfer.eval_util.compare(ts, full_ts.simplify())
+    logging.info("Av KC dist = {}".format(np.sum(KC * np.diff(bp))/(np.max(bp)-np.min(bp))))
 
     SRBs = identify_SRBs(full_ts)
     # record how many SRBs we have
@@ -332,13 +346,24 @@ def tsinfer_dev(
     if len(ct)>2: #omit bincounts 0 and 1
         logging.info(
             "START: #SRBs shared between 2, 3, 4 etc haplotypes = "
-            + ", ".join(["{}:{}".format(i,n) for i,n in enumerate(ct) if i>1 and n>0]))
+            + ", ".join(["{}:{}".format(i,n) for i,n in enumerate(ct)]))
     else:
         logging.warning("START: no SRBs to remove!")
+
     edgecount = full_ts.num_edges, full_ts.simplify().num_edges
     logging.info(" -- N edges in initial full ts = {} ({} simplified, ".format(*edgecount)
         + "{} with path compression on samples)".format(full_ts_pc.num_edges))
     # sort so that we hit the most frequent SRBs first
+
+    ct = np.bincount(np.array([len(bp) for bp in identify_SRBs(full_ts_pc)], dtype=np.int))
+    if len(ct)>2: #omit bincounts 0 and 1
+        logging.info(
+            " (path compressed: #SRBs shared between 2, 3, 4 etc haplotypes = "
+            + ", ".join(["{}:{}".format(i,n) for i,n in enumerate(ct)]))
+    else:
+        logging.warning(" path compressed: no SRBs to remove!")
+    
+    assert False
 
     sorted_SRB_keys = sorted(list(SRBs.keys()), key=lambda x:len(SRBs[x]), reverse=True)
     
@@ -463,8 +488,11 @@ def tsinfer_dev(
         engine="C",
         path_compression=use_built_in_path_compression)
 
+    bp, KC = tsinfer.eval_util.compare(ts, full_ts.simplify())
+    logging.info("Av KC dist = {}".format(np.sum(KC * np.diff(bp))/(np.max(bp)-np.min(bp))))
 
-    
+    print_ts(full_ts.simplify())
+   
 
     SRBs = identify_SRBs(full_ts)
     # print how many SRBs we have
@@ -615,14 +643,16 @@ if __name__ == "__main__":
     # build_profile_inputs(10**4, 100)
     # build_profile_inputs(10**5, 100)
 
-    #for j in range(30,31):
-    #    print(j)
-    #    tsinfer_dev(4, 0.03, seed=j, num_threads=0, engine="C", recombination_rate=1e-8)
+    for j in range(30,31):
+        print(j)
+        #tsinfer_dev(4, 0.1, seed=j, num_threads=0, engine="C", recombination_rate=1e-8)
+        #tsinfer_dev(4, 0.03, seed=j, num_threads=0, engine="C", recombination_rate=1e-8)
+        
     # copy_1kg()
     tsinfer_dev(50, 2, seed=123, num_threads=0, engine="C", recombination_rate=1e-8)
-    tsinfer_dev(50, 2, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
-    tsinfer_dev(50, 2, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
-    tsinfer_dev(50, 2, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(50, 2, seed=456, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(50, 2, seed=689, num_threads=0, engine="C", recombination_rate=1e-8)
+    #tsinfer_dev(50, 2, seed=101112, num_threads=0, engine="C", recombination_rate=1e-8)
 
     # minimise_dev()
 
