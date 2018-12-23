@@ -1420,7 +1420,7 @@ class AncestorData(DataContainer):
     def add_ancestor(self, start, end, time, focal_sites, haplotype):
         """
         Adds an ancestor with the specified haplotype, with ancestral material
-        over the interval [start:end], that is associated with the specfied time
+        over the interval [start:end], that is associated with the specified time
         and has new mutations at the specified list of focal sites.
         """
         self._check_build_mode()
