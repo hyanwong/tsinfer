@@ -746,7 +746,7 @@ class SampleData(DataContainer):
             dtype=np.float64)
         sites_group.create_dataset(
             "genotypes", shape=(0, 0), chunks=(self._chunk_size, self._chunk_size),
-            compressor=self._compressor, dtype=np.uint8)
+            compressor=self._compressor, dtype=np.int8)
         sites_group.create_dataset(
             "inference", shape=(0,), chunks=chunks, compressor=self._compressor,
             dtype=np.uint8)
@@ -1068,8 +1068,9 @@ class SampleData(DataContainer):
         :param arraylike genotypes: An array-like object defining the sample
             genotypes at this site. The array of genotypes corresponds to the
             observed alleles for each sample, represented by indexes into the
-            alleles array. This input is converted to a numpy array with
-            dtype ``np.uint8``; therefore, for maximum efficiency ensure
+            alleles array, or the special value tskit.NULL (representing missing
+            allele information). This input is converted to a numpy array with
+            dtype ``np.int8``; therefore, for maximum efficiency ensure
             that the input array is also of this type.
         :param list(str) alleles: A list of strings defining the alleles at this
             site. The zero'th element of this list is the **ancestral state**
@@ -1088,11 +1089,12 @@ class SampleData(DataContainer):
         :param float age: The age (pastwards) of the focal mutation at this
             site. If not specified or None, the age is computed as the
             frequency of the derived alleles (i.e., the number of non-zero
-            values in the genotypes). Defaults to None.
+            values in the genotypes, with unknown values counting as 0.5).
+            Defaults to None.
         :return: The ID of the newly added site.
         :rtype: int
         """
-        genotypes = np.array(genotypes, dtype=np.uint8, copy=False)
+        genotypes = np.array(genotypes, dtype=np.int8, copy=False)
         self._check_build_mode()
         if self._build_state == self.ADDING_POPULATIONS:
             if genotypes.shape[0] == 0:
@@ -1118,10 +1120,10 @@ class SampleData(DataContainer):
             raise ValueError("Only biallelic sites supported")
         if len(set(alleles)) != len(alleles):
             raise ValueError("Alleles must be distinct")
-        if np.any(np.logical_and(genotypes < 0):
-            raise ValueError("Genotype values must be positive")
+        if np.any(np.logical_and(genotypes < 0, genotypes != tskit.NULL)):
+            raise ValueError("Genotypes values must be positive (or tskit.NULL)")
         if np.any(genotypes >= len(alleles)):
-            raise ValueError("Genotype values must be less than len(alleles)")
+            raise ValueError("Genotypes values must less than len(alleles)")
         if genotypes.shape != (self.num_samples,):
             raise ValueError("Must have num_samples genotypes.")
         if position < 0:
@@ -1142,7 +1144,10 @@ class SampleData(DataContainer):
                 raise ValueError(
                     "Cannot specify singletons or fixed sites for inference")
         if age is None:
-            age = count
+            # Use the total count (freq * num samples) as the age
+            # unknown alleles are set to tskit.NULL, and could be either 0 or 1,
+            # so we split the difference and count them as adding 0.5 to the freq count
+            age = count + 0.5 * np.sum(genotypes == tskit.NULL)
         site_id = self._sites_writer.add(
             position=position, genotypes=genotypes,
             metadata=self._check_metadata(metadata),
