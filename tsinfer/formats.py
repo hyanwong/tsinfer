@@ -1118,8 +1118,10 @@ class SampleData(DataContainer):
             raise ValueError("Only biallelic sites supported")
         if len(set(alleles)) != len(alleles):
             raise ValueError("Alleles must be distinct")
-        if np.any(genotypes >= len(alleles)) or np.any(genotypes < 0):
-            raise ValueError("Genotypes values must be between 0 and len(alleles) - 1")
+        if np.any(np.logical_and(genotypes < 0):
+            raise ValueError("Genotype values must be positive")
+        if np.any(genotypes >= len(alleles)):
+            raise ValueError("Genotype values must be less than len(alleles)")
         if genotypes.shape != (self.num_samples,):
             raise ValueError("Must have num_samples genotypes.")
         if position < 0:
@@ -1129,7 +1131,7 @@ class SampleData(DataContainer):
         if position <= self._last_position:
             raise ValueError(
                 "Sites positions must be unique and added in increasing order")
-        count = np.sum(genotypes)
+        count = np.sum(genotypes > 0)
         if count > 1 and count < self.num_samples:
             if inference is None:
                 inference = True
