@@ -43,7 +43,6 @@ import tsinfer.threads as threads
 import tsinfer.provenance as provenance
 import tsinfer.exceptions as exceptions
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -1099,7 +1098,7 @@ class SampleData(DataContainer):
         :return: The ID of the newly added site.
         :rtype: int
         """
-        genotypes = np.array(genotypes, dtype=np.uint8, copy=False)
+        genotypes = util.safe_np_int_cast(genotypes, dtype=np.uint8, copy=True)
         self._check_build_mode()
         if self._build_state == self.ADDING_POPULATIONS:
             if genotypes.shape[0] == 0:
@@ -1122,11 +1121,16 @@ class SampleData(DataContainer):
         if alleles is None:
             alleles = ["0", "1"]
         if len(alleles) > 2:
-            raise ValueError("Only biallelic sites supported")
+            raise ValueError("Only biallelic sites currently supported")
         if len(set(alleles)) != len(alleles):
             raise ValueError("Alleles must be distinct")
-        if np.any(genotypes >= len(alleles)) or np.any(genotypes < 0):
-            raise ValueError("Genotypes values must be between 0 and len(alleles) - 1")
+        # Check we can never confuse a real allele with the value for MISSING_DATA
+        assert not (0 <= tskit.MISSING_DATA <= len(alleles))
+        if np.any(np.logical_and(genotypes < 0, genotypes != tskit.MISSING_DATA)):
+            raise ValueError("Genotype values must be positive")
+        if np.any(np.logical_and(genotypes >= len(alleles),
+                genotypes != tskit.MISSING_DATA)):
+            raise ValueError("Genotype values must be less than len(alleles)")
         if genotypes.shape != (self.num_samples,):
             raise ValueError("Must have num_samples genotypes.")
         if position < 0:
@@ -1136,8 +1140,11 @@ class SampleData(DataContainer):
         if position <= self._last_position:
             raise ValueError(
                 "Sites positions must be unique and added in increasing order")
-        count = np.sum(genotypes)
-        if count > 1 and count < self.num_samples:
+        n_known = np.sum(genotypes != tskit.MISSING_DATA)
+        n_unknown = self.num_samples - n_known
+        n_ancestral = np.sum(genotypes == 0)
+        n_derived = n_known - n_ancestral
+        if n_derived > 1 and n_derived < n_known:
             if inference is None:
                 inference = True
         else:
@@ -1147,7 +1154,7 @@ class SampleData(DataContainer):
                 raise ValueError(
                     "Cannot specify singletons or fixed sites for inference")
         if age is None:
-            age = count
+            age = n_derived + n_unknown/2.0
         site_id = self._sites_writer.add(
             position=position, genotypes=genotypes,
             metadata=self._check_metadata(metadata),
@@ -1449,7 +1456,7 @@ class AncestorData(DataContainer):
     def add_ancestor(self, start, end, age, focal_sites, haplotype):
         """
         Adds an ancestor with the specified haplotype, with ancestral material
-        over the interval [start:end], that is associated with the specfied age
+        over the interval [start:end], that is associated with the specified age
         and has new mutations at the specified list of focal sites.
         """
         self._check_build_mode()

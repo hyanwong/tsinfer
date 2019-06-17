@@ -26,6 +26,7 @@ updates made to the low-level C engine should be made here
 first.
 """
 import collections
+import logging
 
 import numpy as np
 import tskit
@@ -33,6 +34,7 @@ import sortedcontainers
 
 import tsinfer.constants as constants
 
+logger = logging.getLogger(__name__)
 
 class Edge(object):
 
@@ -140,8 +142,14 @@ class AncestorBuilder(object):
 
     def compute_ancestral_states(self, a, focal_site, sites):
         """
-        Together with make_ancestor, this is the main algorithm as implemented in Fig S2
-        of the preprint, with the buffer.
+        For a given focal site, and set of sites to fill in (usually all the ones 
+        leftwards or rightwards), augment the haplotype array a with the inferred sites
+        Together with `make_ancestor`, which calls this function, these describe the main
+        algorithm as implemented in Fig S2 of the preprint, with the buffer.
+        
+        TODO - account for constants.UNKNOWN_ALLELE in samples (e.g. when encountered in
+        the remove_buffer we should keep the sample in the buffer until we know that
+        there is a conflict, rather than clear the remove buffer on every iteration)
         """
         focal_age = self.sites[focal_site].age
         S = set(np.where(self.sites[focal_site].genotypes == 1)[0])
@@ -154,15 +162,14 @@ class AncestorBuilder(object):
             last_site = l
             if self.sites[l].age > focal_age:
                 g_l = self.sites[l].genotypes
-                ones = sum(g_l[u] for u in S)
-                zeros = len(S) - ones
+                ones = sum(g_l[u] == 1 for u in S)
+                zeros = sum(g_l[u] == 0 for u in S)
                 # print("\tsite", l, ones, zeros, sep="\t")
-                consensus = 0
-                if ones >= zeros:
-                    consensus = 1
+                # TODO - what if ones==zeros==0 ?
+                consensus = 1 if ones >= zeros else 0
                 # print("\tP", l, "\t", len(S), ":ones=", ones, consensus)
                 for u in remove_buffer:
-                    if g_l[u] != consensus:
+                    if g_l[u] == constants.UNKNOWN_ALLELE:
                         # print("\t\tremoving", u)
                         S.remove(u)
                 # print("\t", len(S), remove_buffer, consensus, sep="\t")
@@ -174,6 +181,8 @@ class AncestorBuilder(object):
                     if g_l[u] != consensus:
                         remove_buffer.append(u)
                 a[l] = consensus
+
+        assert a[last_site] != constants.UNKNOWN_ALLELE
         return last_site
 
     def make_ancestor(self, focal_sites, a):
@@ -189,27 +198,33 @@ class AncestorBuilder(object):
         for focal_site in focal_sites:
             a[focal_site] = 1
         S = set(np.where(self.sites[focal_sites[0]].genotypes == 1)[0])
+        # Interpolate ancestral haplotype within focal region (i.e. region 
+        #  spanning from leftmost to rightmost focal site)
         for j in range(len(focal_sites) - 1):
+            # Interpolate region between focal site j and focal site j+1
             for l in range(focal_sites[j] + 1, focal_sites[j + 1]):
                 a[l] = 0
                 if self.sites[l].age > focal_age:
                     g_l = self.sites[l].genotypes
-                    ones = sum(g_l[u] for u in S)
-                    zeros = len(S) - ones
-                    # print("\t", l, ones, zeros, sep="\t")
-                    if ones >= zeros:
+                    ones = sum(g_l[u] == 1 for u in S)
+                    zeros = sum(g_l[u] == 0 for u in S)
+                    #logger.debug("{} {} {}".format(l, ones, zeros))
+                    if ones >= zeros: # Should probably be "ones > zeros" (see below)
+                        # Since this site should be older, this is a conflict
+                        # We just take the majority rule. If equal, we assume that 
+                        # the derived variant is more likely (this is probably wrong)
+                        # (we could possibly do something more sophisticated for ancient
+                        #  samples by taking into account the sample age)
                         a[l] = 1
-        # Go rightwards
+        # Extend ancestral haplotype rightwards from rightmost focal site
         focal_site = focal_sites[-1]
         last_site = self.compute_ancestral_states(
                 a, focal_site, range(focal_site + 1, self.num_sites))
-        assert a[last_site] != constants.UNKNOWN_ALLELE
         end = last_site + 1
-        # Go leftwards
+        # Extend ancestral haplotype leftwards from leftmost focal site
         focal_site = focal_sites[0]
         last_site = self.compute_ancestral_states(
                 a, focal_site, range(focal_site - 1, -1, -1))
-        assert a[last_site] != constants.UNKNOWN_ALLELE
         start = last_site
         return start, end
 
@@ -619,6 +634,9 @@ MISSING = -2
 
 
 class AncestorMatcher(object):
+    """
+    This implements the Li & Stevens matching algorithm, allowing missing chunks
+    """
 
     def __init__(self, tree_sequence_builder, extended_checks=False):
         self.tree_sequence_builder = tree_sequence_builder
@@ -791,6 +809,9 @@ class AncestorMatcher(object):
         return u != 0 and self.parent[u] == -1 and self.left_child[u] == -1
 
     def find_path(self, h, start, end, match):
+        """
+        The Li & Stevens matching process
+        """
         Il = self.tree_sequence_builder.left_index
         Ir = self.tree_sequence_builder.right_index
         M = len(Il)

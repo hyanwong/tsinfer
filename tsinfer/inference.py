@@ -835,9 +835,36 @@ class Matcher(object):
                 tables.edges.add_row(0, tables.sequence_length, root, sample_id)
         else:
             # Subset down to the inference sites and map back to the site indexes.
+
+            # If there is data missing to the left or right for all samples,
+            # then we should have no edges that cover those regions
+            for leftmost_data in range(inference_sites.shape[0]):
+                if np.any(self.sample_data.sites_genotypes[leftmost_data] != 
+                        constants.UNKNOWN_ALLELE):
+                    break
+            for rightmost_data in reversed(range(inference_sites.shape[0])):
+                if np.any(self.sample_data.sites_genotypes[rightmost_data] != 
+                        constants.UNKNOWN_ALLELE):
+                    break
+            print(leftmost_data, rightmost_data)
+            if leftmost_data == 0:
+                # No missing data on the left - TS extends to start
+                leftmost_position = 0
+            else:
+                # Start TS at first non-missing site
+                leftmost_position = position[leftmost_data]
+
+            if rightmost_data == inference_sites.shape[0]-1:
+                # No missing data on the right - TS extends to end
+                rightmost_position = tables.sequence_length
+            else:
+                # End TS at first completely missing site on the right           
+                rightmost_position =  position[rightmost_data+1]
             position = position[inference_sites == 1]
-            pos_map = np.hstack([position, [tables.sequence_length]])
-            pos_map[0] = 0
+            # Nb: the following mapping means that non-inference sites next to an edge
+            # boundary are included in the left hand edge  
+            pos_map = np.hstack([position, [rightmost_position]])
+            pos_map[0] = leftmost_position
             tables.edges.set_columns(
                 left=pos_map[left], right=pos_map[right], parent=parent, child=child)
 
@@ -1029,9 +1056,12 @@ class SampleMatcher(Matcher):
         self.sample_ids = np.zeros(self.num_samples, dtype=np.int32)
 
     def __process_sample(self, sample_id, haplotype, thread_index=0):
-        self._find_path(sample_id, haplotype, 0, self.num_sites, thread_index)
+        # NB the haplotype here does not contain non-inference sites
+        first, last = trim_region(haplotype, trim_value=constants.UNKNOWN_ALLELE)
+        self._find_path(sample_id, haplotype, first, last, thread_index)
         match = self.match[thread_index]
         diffs = np.where(haplotype != match)[0]
+        # Add the mutations in to the tree
         derived_state = haplotype[diffs]
         self.results.set_mutations(sample_id, diffs.astype(np.int32), derived_state)
 
@@ -1175,3 +1205,25 @@ def minimise(ts):
     over the simplify method.
     """
     return ts.simplify(reduce_to_site_topology=True, filter_sites=False)
+    
+def trim_region(filt, trim_value=0., trim='fb'):
+    """
+    Copied from np.trim_zeros, but allows the trim value to be specified, and
+    returns a tuple of (first, last)
+    """
+    first = 0
+    trim = trim.upper()
+    if 'F' in trim:
+        for i in filt:
+            if i != trim_value:
+                break
+            else:
+                first = first + 1
+    last = len(filt)
+    if 'B' in trim:
+        for i in filt[::-1]:
+            if i != trim_value:
+                break
+            else:
+                last = last - 1
+    return first, last

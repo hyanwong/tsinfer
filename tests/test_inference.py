@@ -1922,3 +1922,46 @@ class TestSequentialAugmentedAncestors(TestAugmentedAncestors):
             self.assertEqual(expected_sample_ancestors, num_sample_ancestors)
             tsinfer.verify(samples, final_ts.simplify())
             ancestors_ts = augmented_ancestors
+
+class TestMissingSampleDataInference(unittest.TestCase):
+    """
+    Test that we can infer sites with constants.UNKNOWN_ALLELE
+    """
+    def test_small_missing_example(self):
+        u = tsinfer.constants.UNKNOWN_ALLELE
+        sites_by_samples = np.array([
+            [u, u, u, 1, 1, 0, 1, 1, 1, u],
+            [u, u, u, 1, 0, 0, 1, 1, 0, u],
+            [u, u, u, 1, 0, 1, 1, 0, 1, u],
+            [u, 0, 0, 1, 0, 1, 1, u, u, u],
+            [u, 0, 1, 1, 0, 0, 1, u, u, u],
+            [u, 1, 1, 0, 0, 0, 0, u, u, u]
+            ], dtype = np.uint8)
+        with tsinfer.SampleData() as sample_data:
+            for col in range(sites_by_samples.shape[1]):
+                sample_data.add_site(col, sites_by_samples[:,col])
+        ts = tsinfer.infer(sample_data, engine=tsinfer.PY_ENGINE)
+        self.assertTrue(1.0 in list(ts.breakpoints())) # End of unknown region to left
+        self.assertTrue(3.0 in list(ts.breakpoints())) # End of 1st batch of unknowns
+        self.assertTrue(7.0 in list(ts.breakpoints())) # Start of 2nd batch of unknowns
+        self.assertTrue(9.0 in list(ts.breakpoints())) # Start of unknown region to right
+        for tree in ts.trees():
+            for s in ts.samples():
+                if tree.interval[1] <= 1:
+                    self.assertTrue(tree.parent(s) == tskit.NULL)
+                elif tree.interval[1] <= 3:
+                    if s in [0, 1, 2]:
+                        self.assertTrue(tree.parent(s) == tskit.NULL)
+                    else:
+                        self.assertTrue(tree.parent(s) != tskit.NULL)
+                elif tree.interval[0] >= 9:
+                    self.assertTrue(tree.parent(s) == tskit.NULL)
+                elif tree.interval[0] >= 7:
+                    if s in [3, 4, 5]:
+                        self.assertTrue(tree.parent(s) == tskit.NULL)
+                    else:
+                        self.assertTrue(tree.parent(s) != tskit.NULL)
+
+
+    def test_large_missing_example(self):
+        ts = msprime.simulate(10, mutation_rate=5, recombination_rate=4, random_seed=21)
