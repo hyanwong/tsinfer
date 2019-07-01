@@ -1922,3 +1922,65 @@ class TestSequentialAugmentedAncestors(TestAugmentedAncestors):
             self.assertEqual(expected_sample_ancestors, num_sample_ancestors)
             tsinfer.verify(samples, final_ts.simplify())
             ancestors_ts = augmented_ancestors
+
+class TestExcessBreakpointExample(unittest.TestCase):
+    """
+    A pathological example formed from a tree sequence with 2 trees and a single simple
+    SPR moving sample 0 from sister to sample 2 to sister to sample 1 at position 86.7.
+    There is a  mutation above every branch, so this should be an easy test case for
+    tsinfer.
+    """
+    positions = np.array([  1.07222056,   2.36503752,   2.76244104,   3.80660223,
+        10.2991062 ,  16.04502502,  26.02396722,  27.87443934,
+        36.28582894,  48.95664228,  59.54435361,  62.26835743,
+        63.14038331,  66.44804251,  90.64408095,  92.46389578,
+        92.67385507,  98.73759807, 106.18901301, 111.12849332,
+       112.55358563, 125.8590245 , 126.40964553, 127.41221903,
+       129.23849546, 138.08727831, 139.18238022, 139.37142354])
+    genotypes = np.array([[1, 0, 1, 1, 0, 1, 0, 1, 0, 1],
+           [0, 0, 0, 0, 0, 0, 0, 1, 0, 1],
+           [0, 1, 0, 0, 0, 0, 1, 0, 1, 0],
+           [0, 1, 0, 0, 1, 0, 1, 0, 1, 0],
+           [0, 0, 0, 0, 0, 0, 1, 0, 1, 0],
+           [1, 0, 1, 1, 0, 0, 0, 0, 0, 0],
+           [1, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+           [1, 0, 1, 1, 0, 0, 0, 1, 0, 1],
+           [1, 0, 1, 1, 0, 0, 0, 1, 0, 1],
+           [1, 0, 1, 1, 0, 1, 0, 1, 0, 1],
+           [0, 0, 0, 0, 0, 0, 1, 0, 1, 0],
+           [0, 0, 0, 0, 0, 0, 0, 1, 0, 1],
+           [0, 1, 0, 0, 1, 0, 1, 0, 1, 0],
+           [0, 1, 0, 0, 0, 0, 1, 0, 1, 0],
+           [0, 0, 1, 1, 0, 1, 0, 1, 0, 1],
+           [1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+           [1, 1, 0, 0, 0, 0, 1, 0, 1, 0],
+           [1, 1, 0, 0, 1, 0, 1, 0, 1, 0],
+           [0, 0, 0, 0, 0, 0, 0, 1, 0, 1],
+           [0, 0, 1, 1, 0, 0, 0, 1, 0, 1],
+           [0, 0, 0, 0, 0, 0, 1, 0, 1, 0],
+           [1, 1, 0, 0, 1, 0, 1, 0, 1, 0],
+           [0, 0, 1, 1, 0, 1, 0, 1, 0, 1],
+           [1, 1, 0, 0, 0, 0, 1, 0, 1, 0],
+           [0, 0, 1, 1, 0, 0, 0, 1, 0, 1],
+           [0, 0, 0, 0, 0, 0, 1, 0, 1, 0],
+           [1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+           [0, 0, 0, 0, 0, 0, 0, 1, 0, 1]], dtype=np.uint8)
+
+    @classmethod
+    def setUpClass(cls):
+        with tsinfer.SampleData() as samples:
+            assert cls.genotypes.shape[0] == cls.positions.shape[0]
+            for site in range(cls.genotypes.shape[0]):
+                samples.add_site(
+                    position=cls.positions[site], genotypes=cls.genotypes[site,:])
+        cls.samples = samples
+        
+    def test_ancestral_inference(self):
+        ancestors = tsinfer.generate_ancestors(self.samples, engine=tsinfer.PY_ENGINE)
+        unsimplified_ancestors_ts = tsinfer.match_ancestors(
+            self.samples, ancestors, path_compression=False, engine=tsinfer.PY_ENGINE)
+        ua_ts_tables = unsimplified_ancestors_ts.tables
+        ancestor6_breakpoints = ua_ts_tables.edges.left[ua_ts_tables.edges.child == 6]
+        ancestor6_breakpoint = ancestor6_breakpoints[ancestor6_breakpoints != 0]
+        self.assertEqual(len(ancestor6_breakpoint), 1)
+        self.assertNotEqual(ancestor6_breakpoint[0], self.positions[9]) 
