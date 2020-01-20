@@ -1294,7 +1294,9 @@ class SampleData(DataContainer):
         if inference is None:  # We have now checked all non-inferable conditions
             inference = True
         if time is None:
-            time = count_derived
+            # -inf means time has not been specified. Can't use NaN because equality
+            # comparisons will fail (since NaN != NaN)
+            time = -np.inf
         site_id = self._sites_writer.add(
             position=position, genotypes=genotypes,
             metadata=self._check_metadata(metadata),
@@ -1428,6 +1430,7 @@ class Ancestor(object):
     end = attr.ib()
     time = attr.ib()
     focal_sites = attr.ib()
+    focal_anc_states = attr.ib()
     haplotype = attr.ib()
 
 
@@ -1499,6 +1502,9 @@ class AncestorData(DataContainer):
             "ancestors/focal_sites", shape=(0,), chunks=chunks,
             dtype="array:i4", compressor=self._compressor)
         self.data.create_dataset(
+            "ancestors/focal_anc_states", shape=(0,), chunks=chunks,
+            compressor=self._compressor, dtype="array:i1")
+        self.data.create_dataset(
             "ancestors/haplotype", shape=(0,), chunks=chunks,
             dtype="array:i1", compressor=self._compressor)
 
@@ -1507,6 +1513,7 @@ class AncestorData(DataContainer):
             "end": self.ancestors_end,
             "time": self.ancestors_time,
             "focal_sites": self.ancestors_focal_sites,
+            "focal_anc_states": self.ancestors_focal_anc_states,
             "haplotype": self.ancestors_haplotype},
             num_threads=self._num_flush_threads)
 
@@ -1529,6 +1536,8 @@ class AncestorData(DataContainer):
             ("ancestors/end", zarr_summary(self.ancestors_end)),
             ("ancestors/time", zarr_summary(self.ancestors_time)),
             ("ancestors/focal_sites", zarr_summary(self.ancestors_focal_sites)),
+            ("ancestors/focal_anc_states",
+                zarr_summary(self.ancestors_focal_anc_states)),
             ("ancestors/haplotype", zarr_summary(self.ancestors_haplotype))]
         return super(AncestorData, self).__str__() + self._format_str(values)
 
@@ -1548,6 +1557,9 @@ class AncestorData(DataContainer):
             np.array_equal(self.sites_position[:], other.sites_position[:]) and
             np.array_equal(self.ancestors_start[:], other.ancestors_start[:]) and
             np.array_equal(self.ancestors_end[:], other.ancestors_end[:]) and
+            np.array_equal(
+                self.ancestors_focal_anc_states[:],
+                other.ancestors_focal_anc_states[:]) and
             # Need to take a different approach with np object arrays.
             all(itertools.starmap(np.array_equal, zip(
                 self.ancestors_focal_sites[:], other.ancestors_focal_sites[:]))) and
@@ -1591,6 +1603,10 @@ class AncestorData(DataContainer):
         return self.data["ancestors/focal_sites"]
 
     @property
+    def ancestors_focal_anc_states(self):
+        return self.data["ancestors/focal_anc_states"]
+
+    @property
     def ancestors_haplotype(self):
         return self.data["ancestors/haplotype"]
 
@@ -1610,7 +1626,7 @@ class AncestorData(DataContainer):
     # Write mode
     ####################################
 
-    def add_ancestor(self, start, end, time, focal_sites, haplotype):
+    def add_ancestor(self, start, end, time, focal_sites, focal_anc_states, haplotype):
         """
         Adds an ancestor with the specified haplotype, with ancestral material
         over the interval [start:end], that is associated with the specified timepoint
@@ -1629,15 +1645,16 @@ class AncestorData(DataContainer):
             raise ValueError("haplotypes incorrect shape.")
         if time <= 0:
             raise ValueError("time must be > 0")
-        if not np.all(haplotype[focal_sites - start] == 1):
-            raise ValueError("haplotype[j] must be = 1 for all focal sites")
-        if np.any(focal_sites < start) or np.any(focal_sites >= end):
+        # if not np.all(haplotype[focal_sites - start] == 1):
+        #    raise ValueError("haplotype[j] must be = 1 for all focal sites")
+        if any([abs(int(f)) < start for f in focal_sites]) or any(
+                [abs(int(f)) >= end for f in focal_sites]):
             raise ValueError("focal sites must be between start and end")
-        if np.any(haplotype[start: end] > 1):
-            raise ValueError("Biallelic sites only supported.")
+#        if np.any(haplotype[start: end] > 1):
+#            raise ValueError("Biallelic sites only supported.")
         self.item_writer.add(
             start=start, end=end, time=time, focal_sites=focal_sites,
-            haplotype=haplotype)
+            focal_anc_states=focal_anc_states, haplotype=haplotype)
 
     def finalise(self):
         if self._mode == self.BUILD_MODE:
@@ -1654,10 +1671,12 @@ class AncestorData(DataContainer):
         end = self.ancestors_end[:]
         time = self.ancestors_time[:]
         focal_sites = self.ancestors_focal_sites[:]
+        focal_anc_states = self.ancestors_focal_anc_states[:]
         for j, h in enumerate(chunk_iterator(self.ancestors_haplotype)):
             yield Ancestor(
                 id=j, start=start[j], end=end[j], time=time[j],
-                focal_sites=focal_sites[j], haplotype=h)
+                focal_sites=focal_sites[j], focal_anc_states=focal_anc_states[j],
+                haplotype=h)
 
 
 def load(path):
