@@ -692,7 +692,7 @@ class SampleData(DataContainer):
 
     When writing data to file by specifying a ``path``, the ``max_file_size``
     option puts an upper limit on the possible size of the file. On Windows
-    systems, a file of this size is allocated immediate. On other platforms
+    systems, a file of this size is allocated immediatly. On other platforms
     this space is just "reserved" using sparse file systems, but not
     actually allocated. Therefore, on Windows systems, we have a much smaller
     default size of 1GiB to prevent us allocating very large files for
@@ -1626,15 +1626,17 @@ class AncestorData(DataContainer):
     # Write mode
     ####################################
 
-    def add_ancestor(self, start, end, time, focal_sites, focal_anc_states, haplotype):
+    def add_ancestor(self, start, end, time, focal_sites, haplotype):
         """
         Adds an ancestor with the specified haplotype, with ancestral material
         over the interval [start:end], that is associated with the specified timepoint
         and has new mutations at the specified list of focal sites.
         """
         self._check_build_mode()
+        focal_site_ids = [f.id for f in focal_sites]
         haplotype = tskit.util.safe_np_int_cast(haplotype, dtype=np.int8, copy=True)
-        focal_sites = tskit.util.safe_np_int_cast(focal_sites, dtype=np.int32, copy=True)
+        focal_site_ids = tskit.util.safe_np_int_cast(
+            focal_site_ids, dtype=np.int32, copy=True)
         if start < 0:
             raise ValueError("Start must be >= 0")
         if end > self._num_sites:
@@ -1645,15 +1647,15 @@ class AncestorData(DataContainer):
             raise ValueError("haplotypes incorrect shape.")
         if time <= 0:
             raise ValueError("time must be > 0")
-        # if not np.all(haplotype[focal_sites - start] == 1):
+        # if not np.all( == 1):
         #    raise ValueError("haplotype[j] must be = 1 for all focal sites")
-        if any([abs(int(f)) < start for f in focal_sites]) or any(
-                [abs(int(f)) >= end for f in focal_sites]):
+        if np.any(focal_site_ids < start) or np.any(focal_site_ids >= end):
             raise ValueError("focal sites must be between start and end")
-#        if np.any(haplotype[start: end] > 1):
-#            raise ValueError("Biallelic sites only supported.")
+        if np.any(haplotype[start: end] > 1):
+            raise ValueError("Biallelic sites only supported.")
+        focal_anc_states = np.where(haplotype[focal_site_ids - start] == 1, 0, 1)
         self.item_writer.add(
-            start=start, end=end, time=time, focal_sites=focal_sites,
+            start=start, end=end, time=time, focal_sites=focal_site_ids,
             focal_anc_states=focal_anc_states, haplotype=haplotype)
 
     def finalise(self):

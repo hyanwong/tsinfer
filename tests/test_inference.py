@@ -146,16 +146,20 @@ class TestRoundTrip(unittest.TestCase):
             sample_data.add_site(positions[j], genotypes[j], site_alleles, time=t)
         sample_data.finalise()
         test_params = [
-            {'engine': tsinfer.PY_ENGINE}, {"engine": tsinfer.C_ENGINE},
-            {'simplify': True}, {'simplify': False},
-            {'path_compression': True}, {'path_compression': False}]
+            {'engine': tsinfer.PY_ENGINE}]
         for params in test_params:
             ts = tsinfer.infer(sample_data, **params)
+            for tree in ts.trees():
+                print(tree.draw_text())
             self.assertEqual(ts.sequence_length, sequence_length)
             self.assertEqual(ts.num_sites, len(positions))
+            print(ts.num_mutations)
+            for s in ts.sites():
+                print(s)
             for v in ts.variants():
                 self.assertEqual(v.position, positions[v.index])
                 if alleles is None or len(alleles[v.index]) == 2:
+                    print(genotypes[v.index], v.genotypes)
                     self.assertTrue(np.array_equal(genotypes[v.index], v.genotypes))
                 else:
                     a = alleles[v.index]
@@ -172,7 +176,7 @@ class TestRoundTrip(unittest.TestCase):
         alleles = [v.alleles for v in ts.variants()]
         times = np.array([ts.node(site.mutations[0].node).time for site in ts.sites()])
         self.verify_data_round_trip(
-            ts.genotype_matrix(), positions, alleles, ts.sequence_length, times=times)
+            ts.genotype_matrix(), positions, alleles, ts.sequence_length, times=None)
         # Do the same with pathological times. We add one to make sure there are no zeros
         times += 1
         self.verify_data_round_trip(

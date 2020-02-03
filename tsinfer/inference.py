@@ -253,7 +253,7 @@ def augment_ancestors(
         sample_data, ancestors_ts, indexes, num_threads=0, path_compression=True,
         extended_checks=False, engine=constants.C_ENGINE, progress_monitor=None):
     """
-    augment_ancestors(sample_data, ancestors_ts, indexes, num_threads=0,\
+    augment_ancestors(sample_data, ancestors_ts, indexes, num_threads=0,
         path_compression=True)
 
     Runs the sample matching :ref:`algorithm <sec_inference_match_samples>`
@@ -294,7 +294,7 @@ def match_samples(
         extended_checks=False, stabilise_node_ordering=False, engine=constants.C_ENGINE,
         progress_monitor=None):
     """
-    match_samples(sample_data, ancestors_ts, num_threads=0, path_compression=True,\
+    match_samples(sample_data, ancestors_ts, num_threads=0, path_compression=True,
         simplify=True)
 
     Runs the sample matching :ref:`algorithm <sec_inference_match_samples>`
@@ -376,10 +376,9 @@ class AncestorsGenerator(object):
                 "Made ancestor in {:.2f}s at timepoint {} (epoch {}) "
                 "from {} to {} (len={}) with {} focal sites ({})".format(
                     duration, t, self.timepoint_to_epoch[t], s, e, e - s,
-                    focal_sites.shape[0], focal_sites))
+                    len(focal_sites), [s.id for s in focal_sites]))
             self.ancestor_data.add_ancestor(
-                start=s, end=e, time=t, focal_sites=focal_sites,
-                haplotype=a[s:e])
+                start=s, end=e, time=t, focal_sites=focal_sites, haplotype=a[s:e])
             progress.update()
 
     def _run_threaded(self, progress):
@@ -465,7 +464,7 @@ class AncestorsGenerator(object):
             # Hack to ensure we always have a root with zeros at every position.
             self.ancestor_data.add_ancestor(
                 start=0, end=self.num_sites, time=root_time,
-                focal_sites=np.array([], dtype=np.int32), haplotype=a)
+                focal_sites=[], haplotype=a)
             if self.num_threads <= 0:
                 self._run_synchronous(progress)
             else:
@@ -608,6 +607,12 @@ class Matcher(object):
             ancestral_state=np.zeros(tsb.num_sites, dtype=np.int8) + ord('0'),
             ancestral_state_offset=np.arange(tsb.num_sites + 1, dtype=np.uint32))
         site, node, derived_state, parent = tsb.dump_mutations()
+
+        parent[:] = -1  # HACK
+
+        for s, n, d, p in zip(site, node, derived_state, parent):
+            print(s, n, d, p)
+
         derived_state += ord('0')
         tables.mutations.set_columns(
             site=site, node=node, derived_state=derived_state,
@@ -627,7 +632,10 @@ class Matcher(object):
             "{} sites; {} mutations".format(
                 len(tables.nodes), num_pc_ancestors, len(tables.edges),
                 len(tables.mutations), len(tables.sites)))
-        return tables.tree_sequence()
+        ts = tables.tree_sequence()
+        # for v in ts.variants():
+        #     print("+++", v)
+        return ts
 
     def encode_metadata(self, value):
         return json.dumps(value).encode()
@@ -640,65 +648,48 @@ class Matcher(object):
         """
         num_sites = self.sample_data.num_sites
         num_non_inference_sites = self.sample_data.num_non_inference_sites
-        progress_monitor = self.progress_monitor.get("ms_sites", num_sites)
+        inference_positions = set(tables.sites.position)
 
-        _, node, derived_state, parent = self.tree_sequence_builder.dump_mutations()
         ts = tables.tree_sequence()
+        # Add metadata for already-inferred sites
+        tables.sites.packset_metadata(
+            self.sample_data.sites_metadata[:][self.sample_data.sites_inference[:]])
         if num_non_inference_sites > 0:
+            progress_monitor = self.progress_monitor.get("ms_sites", num_sites)
             assert ts.num_edges > 0
             logger.info(
                 "Starting mutation positioning for {} non inference sites".format(
                     num_non_inference_sites))
-            inferred_site = 0
             trees = ts.trees()
             tree = next(trees)
             for variant in self.sample_data.variants():
                 site = variant.site
-                predefined_anc_state = site.ancestral_state
                 while tree.interval[1] <= site.position:
                     tree = next(trees)
                 assert tree.interval[0] <= site.position < tree.interval[1]
-                tables.sites.add_row(
-                    position=site.position,
-                    ancestral_state=predefined_anc_state,
-                    metadata=self.encode_metadata(site.metadata))
-                if site.inference == 1:
-                    tables.mutations.add_row(
-                        site=site.id, node=node[inferred_site],
-                        derived_state=variant.alleles[derived_state[inferred_site]])
-                    inferred_site += 1
+                if site.inference:
+                    assert site.position in inference_positions
                 else:
+                    site_id = tables.sites.add_row(
+                        position=site.position,
+                        ancestral_state=site.ancestral_state,
+                        metadata=self.encode_metadata(site.metadata))
                     inferred_anc_state, mapped_mutations = tree.map_mutations(
                         variant.genotypes, variant.alleles)
-                    if inferred_anc_state != predefined_anc_state:
+                    if inferred_anc_state != site.ancestral_state:
                         # We need to set the ancestral state to that defined in the
                         # original file
                         for root_node in tree.roots:
                             # Add a transition at each root to the mapped value
                             tables.mutations.add_row(
-                                site=site.id, node=root_node,
+                                site=site_id, node=root_node,
                                 derived_state=inferred_anc_state)
                     for mutation in mapped_mutations:
                         tables.mutations.add_row(
-                            site=site.id, node=mutation.node,
+                            site=site_id, node=mutation.node,
                             derived_state=mutation.derived_state)
                 progress_monitor.update()
-        else:
-            # Simple case where all sites are inference sites. We save a lot of time here
-            # by not decoding the genotypes.
-            logger.info("Inserting detailed site information")
-            position = self.sample_data.sites_position[:]
-            alleles = self.sample_data.sites_alleles[:]
-            metadata = self.sample_data.sites_metadata[:]
-            for j in range(self.num_sites):
-                tables.sites.add_row(
-                    position=position[j],
-                    ancestral_state=alleles[j][0],
-                    metadata=self.encode_metadata(metadata[j]))
-                tables.mutations.add_row(
-                    site=j, node=node[j], derived_state=alleles[j][derived_state[j]])
-                progress_monitor.update()
-        progress_monitor.close()
+            progress_monitor.close()
 
     def get_augmented_ancestors_tree_sequence(self, sample_indexes):
         """
@@ -770,6 +761,7 @@ class Matcher(object):
         inference_sites = self.sample_data.sites_inference[:]
         position = self.sample_data.sites_position[:]
         tables = self.ancestors_ts.dump_tables()
+        print(tables)
         num_ancestral_individuals = len(tables.individuals)
 
         # Currently there's no information about populations etc stored in the
@@ -831,10 +823,9 @@ class Matcher(object):
                 left=pos_map[left], right=pos_map[right], parent=parent, child=child)
 
         logger.debug("Sorting and building intermediate tree sequence.")
-        tables.sites.clear()
-        tables.mutations.clear()
         tables.sort()
         self.insert_sites(tables)
+        tables.sort()
 
         # We don't have a source here because tree sequence files don't have a
         # UUID yet.
@@ -856,6 +847,8 @@ class AncestorMatcher(Matcher):
         self.ancestor_data = ancestor_data
         self.num_ancestors = self.ancestor_data.num_ancestors
         self.epoch = self.ancestor_data.ancestors_time[:]
+        self.focal_site_ancestors = collections.defaultdict(
+            lambda: collections.defaultdict(set))
 
         # Add nodes for all the ancestors so that the ancestor IDs are equal
         # to the node IDs.
@@ -885,19 +878,33 @@ class AncestorMatcher(Matcher):
     def __ancestor_find_path(self, ancestor, thread_index=0):
         haplotype = np.full(self.num_sites, tskit.MISSING_DATA, dtype=np.int8)
         focal_sites = ancestor.focal_sites
+        focal_anc_states = ancestor.focal_anc_states
+        focal_derived_states = 1 - focal_anc_states
+        for site_id, anc_state in zip(focal_sites, focal_anc_states):
+            if anc_state == 0:
+                self.focal_site_ancestors[site_id]['normal'].add(ancestor.id)
+            elif anc_state == 1:
+                self.focal_site_ancestors[site_id]['inverted'].add(ancestor.id)
+            else:
+                assert False
+        # Focal sites that are 0->1
+        zero_to_one_focal_sites = focal_sites[focal_derived_states == 1]
         start = ancestor.start
         end = ancestor.end
-        self.results.set_mutations(ancestor.id, focal_sites)
+        self.results.set_mutations(ancestor.id, zero_to_one_focal_sites)
         assert ancestor.haplotype.shape[0] == (end - start)
         haplotype[start: end] = ancestor.haplotype
-        assert np.all(haplotype[focal_sites] == 1)
+        assert np.all(haplotype[focal_sites] == focal_derived_states)
         logger.debug(
             "Finding path for ancestor {}; start={} end={} num_focal_sites={}".format(
                 ancestor.id, start, end, focal_sites.shape[0]))
-        haplotype[focal_sites] = 0
+        haplotype[focal_sites] = focal_anc_states
         left, right, parent = self._find_path(
                 ancestor.id, haplotype, start, end, thread_index)
-        assert np.all(self.match[thread_index][start: end] == haplotype[start: end])
+        # print("++", parent)
+        # print("++", focal_sites, focal_anc_states)
+        # print("++", self.match[thread_index][start: end])
+        # print("++", haplotype[start: end])
 
     def __start_epoch(self, epoch_index):
         start, end = self.epoch_slices[epoch_index]
@@ -996,6 +1003,9 @@ class AncestorMatcher(Matcher):
         ts = self.store_output()
         self.match_progress.close()
         logger.info("Finished ancestor matching")
+        for k in sorted(self.focal_site_ancestors.keys()):
+            print("Site {}: {}".format(k, self.focal_site_ancestors[k]))
+        raise
         return ts
 
     def store_output(self):
@@ -1020,7 +1030,10 @@ class SampleMatcher(Matcher):
     def __process_sample(self, sample_id, haplotype, thread_index=0):
         self._find_path(sample_id, haplotype, 0, self.num_sites, thread_index)
         match = self.match[thread_index]
+        # The following should always be 0, as matches should be exact
+        # (singletons not counted in inference)
         diffs = np.where(haplotype != match)[0]
+        print("diffs", diffs)
         derived_state = haplotype[diffs]
         self.results.set_mutations(sample_id, diffs.astype(np.int32), derived_state)
 
@@ -1094,6 +1107,8 @@ class SampleMatcher(Matcher):
     def finalise(self, simplify=True, stabilise_node_ordering=False):
         logger.info("Finalising tree sequence")
         ts = self.get_samples_tree_sequence()
+        for v in ts.variants():
+            print(v)
         if simplify:
             logger.info(
                 "Running simplify(keep_unary=True) on {} nodes and {} edges".format(

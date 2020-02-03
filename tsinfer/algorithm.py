@@ -48,22 +48,31 @@ class Edge(object):
             self.left, self.right, self.parent, self.child)
 
 
-class Site(object):
-    def __init__(self, id, time, genotypes):
+class FocalSite(object):
+    """
+    Store information about a focal site - i.e. a site around which which we will
+    construct an ancestral haplotype.
+    """
+    def __init__(self, id, time, genotypes, ancestral_state=0):
         self.id = id
-        self.time = time
         self.genotypes = genotypes
+        self.time = time
+        self.ancestral_state = ancestral_state
+
+    def __str__(self):
+        return "FocalSite(id={}, time={}, ancestral_state={})".format(
+            self.id, self.time, self.ancestral_state)
 
 
 class AncestorBuilder(object):
     """
     Builds inferred ancestors.
-    This implementation partially allows for multiple focal sites per ancestor
+    This implementation allows for multiple focal sites per ancestor
     """
     def __init__(self, num_samples, num_sites):
         self.num_samples = num_samples
         self.num_sites = num_sites
-        self.sites = [None for _ in range(self.num_sites)]
+        self.ancestors_by_site = [None for _ in range(num_sites)]  # Listed in site order
         # Create a mapping from time to sites. Different sites can exist at the same
         # timepoint. If we expect them to be part of the same ancestor node we can give
         # them the same ancestor_uid: the time_map contains values keyed by time, with
@@ -74,23 +83,32 @@ class AncestorBuilder(object):
 
     def add_site(self, site_id, time, genotypes):
         """
-        Adds a new site at the specified ID to the builder.
+        Adds a new site at the specified ID to the builder. If time is None, the
+        time is taken from the frequency, and two sites are added at the same
+        of the site which has the ancestral states polarised in the other direction
         """
-        self.sites[site_id] = Site(site_id, time, genotypes)
-        sites_at_fixed_timepoint = self.time_map[time]
+        print("Site {:2d} : {}".format(site_id, genotypes))
         # Sites with an identical variant distribution (i.e. with the same
         # genotypes.tobytes() value) and at the same time, are put into the same ancestor
         # to which we allocate a unique ID (just use the genotypes.tobytes() value)
+        if not np.isfinite(time):
+            time = np.sum(genotypes > 0)
+            # We could have misidentified the ancestral state, which will
+            # change the time estimate. Add a new site, swapping 0 <-> 1.
+            # We must remember that the allele meaning has swapped too
+            invert_genotypes = 1 - genotypes
+            invert_freq = np.sum(genotypes > 0)
+            invert_ancestral_site = FocalSite(site_id, invert_freq, invert_genotypes, 1)
+            ancestor_uid = invert_genotypes.tobytes()
+            self.time_map[invert_freq][ancestor_uid].append(invert_ancestral_site)
+
+        ancestral_site = FocalSite(site_id, time, genotypes)
+        self.ancestors_by_site[site_id] = ancestral_site
         ancestor_uid = genotypes.tobytes()
-        # Add each site to the list for this ancestor_uid at this timepoint
-        sites_at_fixed_timepoint[ancestor_uid].append(site_id)
+        self.time_map[time][ancestor_uid].append(ancestral_site)
 
     def print_state(self):
         print("Ancestor builder")
-        print("Sites = ")
-        for j in range(self.num_sites):
-            site = self.sites[j]
-            print(j, site.genotypes, site.time, sep="\t")
         print("Time map")
         for t in sorted(self.time_map.keys()):
             sites_at_fixed_timepoint = self.time_map[t]
@@ -103,13 +121,16 @@ class AncestorBuilder(object):
     def break_ancestor(self, a, b, samples):
         """
         Returns True if we should split the ancestor with focal sites at
-        a and b into two separate ancestors.
+        a and b into two separate ancestors. We do this when the inference
+        sites between a and b contain any older sites that are not compatible
+        (i.e. break the 3 gamete test)
         """
         # return True
         index = np.where(samples == 1)[0]
-        for j in range(a + 1, b):
-            if self.sites[j].time > self.sites[a].time:
-                gj = self.sites[j].genotypes[index]
+        base_time = a.time
+        for j in range(a.id + 1, b.id):
+            if self.ancestors_by_site[j].time > base_time:
+                gj = self.ancestors_by_site[j].genotypes[index]
                 if not (np.all(gj == 1) or np.all(gj == 0)):
                     return True
         return False
@@ -128,8 +149,8 @@ class AncestorBuilder(object):
             # We sort by the genotype patterns
             keys = sorted(self.time_map[t].keys())
             for key in keys:
-                focal_sites = np.array(self.time_map[t][key], dtype=np.int32)
-                samp = np.frombuffer(key, dtype=np.int8)
+                focal_sites = self.time_map[t][key]
+                samp = focal_sites[0].genotypes
                 # print("focal_sites = ", key, samp, focal_sites)
                 start = 0
                 for j in range(len(focal_sites) - 1):
@@ -144,17 +165,17 @@ class AncestorBuilder(object):
         Together with make_ancestor, this is the main algorithm as implemented in Fig S2
         of the preprint, with the buffer.
         """
-        focal_time = self.sites[focal_site].time
-        S = set(np.where(self.sites[focal_site].genotypes == 1)[0])
+        focal_time = focal_site.time
+        S = set(np.where(focal_site.genotypes == 1)[0])
         # Break when we've lost half of S
         min_sample_set_size = len(S) // 2
         remove_buffer = []
-        last_site = focal_site
+        last_site = focal_site.id
         for l in sites:
             a[l] = 0
             last_site = l
-            if self.sites[l].time > focal_time:
-                g_l = self.sites[l].genotypes
+            if self.ancestors_by_site[l].time > focal_time:
+                g_l = self.ancestors_by_site[l].genotypes
                 ones = sum(g_l[u] for u in S)
                 zeros = len(S) - ones
                 # print("\tsite", l, ones, zeros, sep="\t")
@@ -182,36 +203,45 @@ class AncestorBuilder(object):
         Fills out the array a with the haplotype
         return the start and end of an ancestor
         """
-        focal_time = self.sites[focal_sites[0]].time
-        # check all focal sites in this ancestor are at the same timepoint
-        assert all([self.sites[fs].time == focal_time for fs in focal_sites])
+        focal_time = focal_sites[0].time
+        assert all([fs.time == focal_time for fs in focal_sites])
 
         a[:] = tskit.MISSING_DATA
-        for focal_site in focal_sites:
-            a[focal_site] = 1
-        S = set(np.where(self.sites[focal_sites[0]].genotypes == 1)[0])
+        assert all(
+            focal_sites[i].id < focal_sites[i + 1].id
+            for i in range(len(focal_sites) - 1))
+        for site in focal_sites:
+            # Assign the derived state
+            a[site.id] = 1 if site.ancestral_state == 0 else 0
+
+        # Fill in the sites between the leftmost and rightmost focal sites
+        S = set(np.where(focal_sites[0].genotypes == 1)[0])
         for j in range(len(focal_sites) - 1):
-            for l in range(focal_sites[j] + 1, focal_sites[j + 1]):
+            for l in range(focal_sites[j].id + 1, focal_sites[j + 1].id):
                 a[l] = 0
-                if self.sites[l].time > focal_time:
-                    g_l = self.sites[l].genotypes
+                if self.ancestors_by_site[l].time > focal_time:
+                    g_l = self.ancestors_by_site[l].genotypes
                     ones = sum(g_l[u] for u in S)
                     zeros = len(S) - ones
                     # print("\t", l, ones, zeros, sep="\t")
                     if ones >= zeros:
                         a[l] = 1
+        print("b", a)
         # Go rightwards
-        focal_site = focal_sites[-1]
-        last_site = self.compute_ancestral_states(
-                a, focal_site, range(focal_site + 1, self.num_sites))
+        rightmost_focal_site = focal_sites[-1]
+        infer_range = range(rightmost_focal_site.id + 1, self.num_sites)
+        last_site = self.compute_ancestral_states(a, rightmost_focal_site, infer_range)
         assert a[last_site] != tskit.MISSING_DATA
         end = last_site + 1
+        print("c", a)
         # Go leftwards
-        focal_site = focal_sites[0]
-        last_site = self.compute_ancestral_states(
-                a, focal_site, range(focal_site - 1, -1, -1))
+        leftmost_focal_site = focal_sites[0]
+        infer_range = range(leftmost_focal_site.id - 1, -1, -1)
+        last_site = self.compute_ancestral_states(a, leftmost_focal_site, infer_range)
         assert a[last_site] != tskit.MISSING_DATA
         start = last_site
+        print("d", a)
+        print([str(s) for s in focal_sites], "from", start, "to", end)
         return start, end
 
         # Version with 1 focal site
