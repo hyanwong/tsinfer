@@ -1236,9 +1236,10 @@ class SampleData(DataContainer):
             number of samples carrying the derived state is greater than
             1 and less than the number of samples.
         :param float time: The time of occurence (pastwards) of the mutation to the
-            derived state at this site. If not specified or None, the frequency of the
+            derived state at this site. If not specified or None, the count of the
             derived alleles (i.e., the number of non-zero values in the genotypes) is
-            used instead. For biallelic sites this should provide a reasonable estimate
+            used instead, with missing values contributing 0.5 to the count. For
+            biallelic sites this count should provide a reasonable estimate
             of the relative time, as used to order ancestral haplotypes during the
             inference process. For sites not used in inference, such as singletons or
             sites with more than two alleles, the value is unused. Defaults to None.
@@ -1267,20 +1268,24 @@ class SampleData(DataContainer):
 
         if alleles is None:
             alleles = ["0", "1"]
-        if np.any(genotypes == tskit.MISSING_DATA) and alleles[-1] is not None:
-            alleles.append(None)
+        n_alleles = len(alleles[:-1]) if alleles[-1] is None else len(alleles)
+        non_missing = (genotypes != tskit.MISSING_DATA)
+        n_known = np.sum(non_missing)
+        n_unknown = self.num_samples - n_known
+        n_ancestral = np.sum(genotypes == 0)
+        n_derived = n_known - n_ancestral
+
         if len(set(alleles)) != len(alleles):
             raise ValueError("Alleles must be distinct")
-        # Check we can never confuse a real allele with the value for MISSING_DATA
-        assert not (0 <= tskit.MISSING_DATA <= len(alleles))
-        if np.any(np.logical_and(genotypes < 0, genotypes != tskit.MISSING_DATA)):
-            raise ValueError("Non-missing values for genotypes cannot be negative")
-        if np.any(np.logical_and(
-                genotypes >= len(alleles), genotypes != tskit.MISSING_DATA)):
-            raise ValueError("Non-missing values for genotypes must be < len(alleles)")
+        if n_unknown > 0 and alleles[-1] is not None:
+            alleles = alleles + [None]
         if genotypes.shape != (self.num_samples,):
             raise ValueError(
                 "Must have {} (num_samples) genotypes.".format(self.num_samples))
+        if np.any(genotypes[non_missing] < 0):
+            raise ValueError("Non-missing values for genotypes cannot be negative")
+        if np.any(genotypes[non_missing] >= n_alleles):
+            raise ValueError("Non-missing values for genotypes must be < num alleles")
         if position < 0:
             raise ValueError("Site position must be > 0")
         if self.sequence_length > 0 and position >= self.sequence_length:
@@ -1289,24 +1294,17 @@ class SampleData(DataContainer):
             raise ValueError(
                 "Site positions must be unique and added in increasing order")
 
-        n_alleles = len(set(alleles) - set([None]))
-        n_known = np.sum(genotypes != tskit.MISSING_DATA)
-        n_unknown = self.num_samples - n_known
-        n_ancestral = np.sum(genotypes == 0)
-        n_derived = n_known - n_ancestral
         if n_alleles > 2:
-            if inference is True:
+            if inference:
                 raise ValueError("Only biallelic sites supported for inference")
-            if inference is None:
-                inference = False
-        if n_derived > 1 and n_derived < n_known:
+            inference = False
+        if n_derived <= 1 or n_derived >= n_known:
+            if inference:
+                raise ValueError("Cannot use singletons or fixed sites for inference")
+            inference = False
+        else:
             if inference is None:
                 inference = True
-        else:
-            if inference is True:
-                raise ValueError("Cannot use singletons or fixed sites for inference")
-            if inference is None:
-                inference = False
         if time is None:
             time = n_derived  # If n_alleles > 2, then this may not be a sensible approx
             time += n_unknown/2.0  # Unknown alleles create intermediate age
