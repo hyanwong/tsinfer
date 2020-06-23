@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
 
 #include "avl.h"
 
@@ -208,7 +209,8 @@ ancestor_builder_get_consistent_samples(
 static int
 ancestor_builder_compute_ancestral_states(ancestor_builder_t *self, int direction,
     tsk_id_t focal_site, allele_t *ancestor, tsk_id_t *restrict sample_set,
-    bool *restrict disagree, tsk_id_t *last_site_ret)
+    bool *restrict disagree, tsk_id_t *last_site_ret, double cutoff_power,
+    double oldest_focal_time)
 {
     int ret = 0;
     tsk_id_t last_site = focal_site;
@@ -216,8 +218,10 @@ ancestor_builder_compute_ancestral_states(ancestor_builder_t *self, int directio
     tsk_id_t u;
     size_t j, ones, zeros, tmp_size, sample_set_size, min_sample_set_size;
     double focal_site_time = self->sites[focal_site].time;
+    double upper_cutoff;
     const site_t *restrict sites = self->sites;
     const size_t num_sites = self->num_sites;
+    const size_t num_samples = self->num_samples;
     const allele_t *restrict genotypes;
     allele_t consensus;
 
@@ -226,9 +230,22 @@ ancestor_builder_compute_ancestral_states(ancestor_builder_t *self, int directio
     /* This can't happen because we've already tested for it in
      * ancestor_builder_compute_between_focal_sites */
     assert(sample_set_size > 0);
-    memset(disagree, 0, self->num_samples * sizeof(*disagree));
-    min_sample_set_size = sample_set_size / 2;
+    memset(disagree, 0, num_samples * sizeof(*disagree));
 
+    upper_cutoff = 2; /* could set this to e.g. 2.01 to build slightly longer old ancs */
+    if (isfinite(cutoff_power)) {
+        min_sample_set_size = (int) sample_set_size *
+            (pow((double) sample_set_size/num_samples, cutoff_power)/upper_cutoff + 0.5);
+    } else {
+        min_sample_set_size = sample_set_size / 2;
+    }
+    /* printf("Focal time %f, Oldest time %f\n", focal_site_time, oldest_focal_time); */
+    if (focal_site_time == oldest_focal_time) {
+        /* printf("Matched\n"); */
+        /* the ancestors at the highest freq can only conflict if we consider them a
+           fraction *younger* than the rest of the ancestors at that time point */
+        focal_site_time = focal_site_time - 1.0/(1000.0 * num_samples);
+    }
     /* printf("site=%d, direction=%d min_sample_size=%d\n", (int) focal_site, direction,
      */
     /*         (int) min_sample_set_size); */
@@ -363,7 +380,8 @@ out:
 /* Build the ancestors for sites in the specified focal sites */
 int
 ancestor_builder_make_ancestor(ancestor_builder_t *self, size_t num_focal_sites,
-    tsk_id_t *focal_sites, tsk_id_t *ret_start, tsk_id_t *ret_end, allele_t *ancestor)
+    tsk_id_t *focal_sites, tsk_id_t *ret_start, tsk_id_t *ret_end, allele_t *ancestor,
+    double cutoff_power, double oldest_focal_time)
 {
     int ret = 0;
     tsk_id_t focal_site, last_site;
@@ -384,7 +402,8 @@ ancestor_builder_make_ancestor(ancestor_builder_t *self, size_t num_focal_sites,
 
     focal_site = focal_sites[num_focal_sites - 1];
     ret = ancestor_builder_compute_ancestral_states(
-        self, +1, focal_site, ancestor, sample_set, disagree, &last_site);
+        self, +1, focal_site, ancestor, sample_set, disagree, &last_site, cutoff_power,
+        oldest_focal_time);
     if (ret != 0) {
         goto out;
     }
@@ -392,7 +411,8 @@ ancestor_builder_make_ancestor(ancestor_builder_t *self, size_t num_focal_sites,
 
     focal_site = focal_sites[0];
     ret = ancestor_builder_compute_ancestral_states(
-        self, -1, focal_site, ancestor, sample_set, disagree, &last_site);
+        self, -1, focal_site, ancestor, sample_set, disagree, &last_site, cutoff_power,
+        oldest_focal_time);
     if (ret != 0) {
         goto out;
     }

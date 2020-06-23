@@ -201,7 +201,8 @@ int ancestor_builder_print_state(ancestor_builder_t *self, FILE *out);
 int ancestor_builder_add_site(
     ancestor_builder_t *self, double time, allele_t *genotypes);
 int ancestor_builder_make_ancestor(ancestor_builder_t *self, size_t num_focal_sites,
-    tsk_id_t *focal_sites, tsk_id_t *start, tsk_id_t *end, allele_t *haplotype);
+    tsk_id_t *focal_sites, tsk_id_t *start, tsk_id_t *end, allele_t *haplotype,
+    double cutoff_power, double oldest_focal_time);
 int ancestor_builder_finalise(ancestor_builder_t *self);
 
 int ancestor_matcher_alloc(ancestor_matcher_t *self,

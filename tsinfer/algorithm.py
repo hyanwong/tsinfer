@@ -31,6 +31,7 @@ import numpy as np
 import sortedcontainers
 import tskit
 import attr
+import math
 
 import tsinfer.constants as constants
 
@@ -151,7 +152,9 @@ class AncestorBuilder(object):
                 ret.append((t, focal_sites[start:]))
         return ret
 
-    def compute_ancestral_states(self, a, focal_site, sites):
+    def compute_ancestral_states(
+        self, a, focal_site, sites, cutoff_power, oldest_focal_time
+    ):
         """
         For a given focal site, and set of sites to fill in (usually all the ones
         leftwards or rightwards), augment the haplotype array a with the inferred sites
@@ -161,7 +164,27 @@ class AncestorBuilder(object):
         focal_time = self.sites[focal_site].time
         S = set(np.where(self.sites[focal_site].genotypes == 1)[0])
         # Break when we've lost half of S
-        min_sample_set_size = len(S) // 2
+        upper_cutoff = 2
+        # could set this to e.g. 2.01 to build slightly longer old anc
+        sample_set_size = len(S)
+        if math.isfinite(cutoff_power):
+            min_sample_set_size = int(
+                math.floor(
+                    sample_set_size
+                    * (
+                        (sample_set_size / self.num_samples) ** cutoff_power
+                        / upper_cutoff
+                        + 0.5
+                    )
+                )
+            )
+        else:
+            min_sample_set_size = sample_set_size // 2
+        if focal_time == oldest_focal_time:
+            # the ancestors at the highest freq can only conflict if we consider them a
+            # fraction *younger* than the rest of the ancestors at that time point
+            focal_time = focal_time - 1.0 / (1000.0 * self.num_samples)
+
         remove_buffer = []
         last_site = focal_site
         # print("Focal site", focal_site, "time", focal_time)
@@ -194,7 +217,7 @@ class AncestorBuilder(object):
         assert a[last_site] != tskit.MISSING_DATA
         return last_site
 
-    def make_ancestor(self, focal_sites, a):
+    def make_ancestor(self, focal_sites, a, cutoff_power, oldest_focal_time):
         """
         Fills out the array a with the haplotype
         return the start and end of an ancestor
@@ -227,14 +250,22 @@ class AncestorBuilder(object):
         # Extend ancestral haplotype rightwards from rightmost focal site
         focal_site = focal_sites[-1]
         last_site = self.compute_ancestral_states(
-            a, focal_site, range(focal_site + 1, self.num_sites)
+            a,
+            focal_site,
+            range(focal_site + 1, self.num_sites),
+            cutoff_power,
+            oldest_focal_time,
         )
         assert a[last_site] != tskit.MISSING_DATA
         end = last_site + 1
         # Extend ancestral haplotype leftwards from leftmost focal site
         focal_site = focal_sites[0]
         last_site = self.compute_ancestral_states(
-            a, focal_site, range(focal_site - 1, -1, -1)
+            a,
+            focal_site,
+            range(focal_site - 1, -1, -1),
+            cutoff_power,
+            oldest_focal_time,
         )
         start = last_site
         return start, end

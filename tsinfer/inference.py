@@ -265,6 +265,8 @@ def generate_ancestors(
     exclude_positions=None,
     engine=constants.C_ENGINE,
     progress_monitor=None,
+    cutoff_power=4,
+    trim_oldest=False,
     **kwargs,
 ):
     """
@@ -304,6 +306,8 @@ def generate_ancestors(
             sample_data,
             ancestor_data,
             num_threads=num_threads,
+            cutoff_power=cutoff_power,
+            trim_oldest=trim_oldest,
             engine=engine,
             progress_monitor=progress_monitor,
         )
@@ -502,6 +506,8 @@ class AncestorsGenerator(object):
         num_threads=0,
         engine=constants.C_ENGINE,
         progress_monitor=None,
+        cutoff_power=4,
+        trim_oldest=False,
     ):
         self.sample_data = sample_data
         self.ancestor_data = ancestor_data
@@ -510,6 +516,8 @@ class AncestorsGenerator(object):
         self.num_sites = 0
         self.num_samples = sample_data.num_samples
         self.num_threads = num_threads
+        self.cutoff_power = cutoff_power
+        self.trim_oldest = trim_oldest
         if engine == constants.C_ENGINE:
             logger.debug("Using C AncestorBuilder implementation")
             self.ancestor_builder = _tsinfer.AncestorBuilder(
@@ -571,7 +579,9 @@ class AncestorsGenerator(object):
         a = np.zeros(self.num_sites, dtype=np.int8)
         for t, focal_sites in self.descriptors:
             before = time.perf_counter()
-            start, end = self.ancestor_builder.make_ancestor(focal_sites, a)
+            start, end = self.ancestor_builder.make_ancestor(
+                focal_sites, a, self.cutoff_power, self.oldest_timepoint
+            )
             duration = time.perf_counter() - before
             logger.debug(
                 "Made ancestor in {:.2f}s at timepoint {} (epoch {}) "
@@ -628,7 +638,9 @@ class AncestorsGenerator(object):
                 if work is None:
                     break
                 index, t, focal_sites = work
-                start, end = self.ancestor_builder.make_ancestor(focal_sites, a)
+                start, end = self.ancestor_builder.make_ancestor(
+                    focal_sites, a, self.cutoff_power, self.oldest_timepoint
+                )
                 with add_lock:
                     haplotype = a[start:end].copy()
                     heapq.heappush(
@@ -664,6 +676,7 @@ class AncestorsGenerator(object):
         for t, _ in reversed(self.descriptors):
             if t not in self.timepoint_to_epoch:
                 self.timepoint_to_epoch[t] = len(self.timepoint_to_epoch) + 1
+
         if self.num_ancestors > 0:
             logger.info("Starting build for {} ancestors".format(self.num_ancestors))
             progress = self.progress_monitor.get("ga_generate", self.num_ancestors)
@@ -689,6 +702,13 @@ class AncestorsGenerator(object):
                 focal_sites=np.array([], dtype=np.int32),
                 haplotype=a,
             )
+
+            if self.trim_oldest:
+                self.oldest_timepoint = max(self.timepoint_to_epoch.keys())
+            else:
+                # Set oldest timepoint much higher than possible
+                self.oldest_timepoint = ultimate_ancestor_time + 1
+
             if self.num_threads <= 0:
                 self._run_synchronous(progress)
             else:

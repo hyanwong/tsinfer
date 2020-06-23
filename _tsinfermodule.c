@@ -165,21 +165,25 @@ AncestorBuilder_make_ancestor(AncestorBuilder *self, PyObject *args, PyObject *k
 {
     int err;
     PyObject *ret = NULL;
-    static char *kwlist[] = {"focal_sites", "ancestor", NULL};
+    static char *kwlist[] = {
+        "focal_sites", "ancestor", "cutoff_power","oldest_focal_time", NULL};
     PyObject *ancestor = NULL;
     PyArrayObject *ancestor_array = NULL;
     PyObject *focal_sites = NULL;
     PyArrayObject *focal_sites_array = NULL;
     size_t num_focal_sites;
     size_t num_sites;
+    double oldest_focal_time;
+    double cutoff_power;
     tsk_id_t start, end;
     npy_intp *shape;
 
     if (AncestorBuilder_check_state(self) != 0) {
         goto out;
     }
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO!", kwlist,
-            &focal_sites, &PyArray_Type, &ancestor)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO!dd", kwlist,
+            &focal_sites, &PyArray_Type, &ancestor, &cutoff_power,
+            &oldest_focal_time)) {
         goto out;
     }
     num_sites = self->builder->num_sites;
@@ -215,7 +219,8 @@ AncestorBuilder_make_ancestor(AncestorBuilder *self, PyObject *args, PyObject *k
     Py_BEGIN_ALLOW_THREADS
     err = ancestor_builder_make_ancestor(self->builder, num_focal_sites,
         (int32_t *) PyArray_DATA(focal_sites_array),
-        &start, &end, (int8_t *) PyArray_DATA(ancestor_array));
+        &start, &end, (int8_t *) PyArray_DATA(ancestor_array),
+        cutoff_power, oldest_focal_time);
     Py_END_ALLOW_THREADS
     if (err != 0) {
         handle_library_error(err);
