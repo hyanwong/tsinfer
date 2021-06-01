@@ -81,7 +81,7 @@ class AncestorBuilder:
     def num_sites(self):
         return len(self.sites)
 
-    def add_site(self, time, genotypes):
+    def add_site(self, time, genotypes, force_unique=False):
         """
         Adds a new site at the specified ID to the builder.
         """
@@ -92,6 +92,8 @@ class AncestorBuilder:
         # genotypes.tobytes() value) and at the same time, are put into the same ancestor
         # to which we allocate a unique ID (just use the genotypes.tobytes() value)
         ancestor_uid = genotypes.tobytes()
+        if force_unique:
+            ancestor_uid += str(site_id).encode()  # make the uid unique for this site
         # Add each site to the list for this ancestor_uid at this timepoint
         sites_at_fixed_timepoint[ancestor_uid].append(site_id)
 

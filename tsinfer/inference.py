@@ -321,6 +321,7 @@ def generate_ancestors(
     exclude_positions=None,
     num_threads=0,
     # Deliberately undocumented parameters below
+    separate_ancestor_sites=None,
     engine=constants.C_ENGINE,
     progress_monitor=None,
     **kwargs,
@@ -372,7 +373,7 @@ def generate_ancestors(
             engine=engine,
             progress_monitor=progress_monitor,
         )
-        generator.add_sites(exclude_positions)
+        generator.add_sites(exclude_positions, separate_ancestor_sites)
         generator.run()
         ancestor_data.record_provenance("generate-ancestors")
     return ancestor_data
@@ -799,7 +800,7 @@ class AncestorsGenerator:
         else:
             raise ValueError(f"Unknown engine:{engine}")
 
-    def add_sites(self, exclude_positions=None):
+    def add_sites(self, exclude_positions=None, separate_ancestor_sites=None):
         """
         Add all sites that are suitable for inference into the
         ancestor builder (and subsequent inference), unless they
@@ -848,7 +849,14 @@ class AncestorsGenerator:
                 if np.isnan(time):
                     use_site = False  # Site with meaningless time value: skip inference
             if use_site:
-                self.ancestor_builder.add_site(time, variant.genotypes)
+                if separate_ancestor_sites is not None:
+                    self.ancestor_builder.add_site(
+                        time,
+                        variant.genotypes,
+                        force_unique=separate_ancestor_sites[site.id],
+                    )
+                else:
+                    self.ancestor_builder.add_site(time, variant.genotypes)
                 inference_site_id.append(site.id)
                 self.num_sites += 1
             progress.update()
