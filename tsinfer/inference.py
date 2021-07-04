@@ -223,6 +223,7 @@ def infer(
     precision=None,
     engine=constants.C_ENGINE,
     progress_monitor=None,
+    record_provenance=True,
 ):
     """
     infer(sample_data, *, recombination_rate=None, mismatch_ratio=None,\
@@ -287,6 +288,7 @@ def infer(
         exclude_positions=exclude_positions,
         engine=engine,
         progress_monitor=progress_monitor,
+        record_provenance=False,
     )
     ancestors_ts = match_ancestors(
         sample_data,
@@ -298,6 +300,7 @@ def infer(
         precision=precision,
         path_compression=path_compression,
         progress_monitor=progress_monitor,
+        record_provenance=False,
     )
     inferred_ts = match_samples(
         sample_data,
@@ -310,7 +313,13 @@ def infer(
         path_compression=path_compression,
         simplify=simplify,
         progress_monitor=progress_monitor,
+        record_provenance=False,
     )
+    if record_provenance:
+        tables = inferred_ts.dump_tables()
+        record = provenance.get_provenance_dict(command="infer")
+        tables.provenances.add_row(record=json.dumps(record))
+        inferred_ts = tables.tree_sequence()
     return inferred_ts
 
 
@@ -323,6 +332,7 @@ def generate_ancestors(
     # Deliberately undocumented parameters below
     engine=constants.C_ENGINE,
     progress_monitor=None,
+    record_provenance=True,
     **kwargs,
 ):
     """
@@ -374,7 +384,8 @@ def generate_ancestors(
         )
         generator.add_sites(exclude_positions)
         generator.run()
-        ancestor_data.record_provenance("generate-ancestors")
+        if record_provenance:
+            ancestor_data.record_provenance("generate-ancestors")
     return ancestor_data
 
 
@@ -393,6 +404,7 @@ def match_ancestors(
     engine=constants.C_ENGINE,
     progress_monitor=None,
     extended_checks=False,
+    record_provenance=True,
 ):
     """
     match_ancestors(sample_data, ancestor_data, *, recombination_rate=None,\
@@ -446,7 +458,17 @@ def match_ancestors(
         engine=engine,
         progress_monitor=progress_monitor,
     )
-    return matcher.match_ancestors()
+    ts = matcher.match_ancestors()
+    if record_provenance:
+        tables = ts.dump_tables()
+        for timestamp, record in ancestor_data.provenances():
+            tables.provenances.add_row(timestamp=timestamp, record=json.dumps(record))
+        record = provenance.get_provenance_dict(
+            command="match_ancestors", source={"uuid": ancestor_data.uuid}
+        )
+        tables.provenances.add_row(record=json.dumps(record))
+        ts = tables.tree_sequence()
+    return ts
 
 
 def augment_ancestors(
@@ -465,6 +487,7 @@ def augment_ancestors(
     extended_checks=False,
     engine=constants.C_ENGINE,
     progress_monitor=None,
+    record_provenance=True,
 ):
     """
     augment_ancestors(sample_data, ancestors_ts, indexes, *, recombination_rate=None,\
@@ -527,6 +550,11 @@ def augment_ancestors(
     )
     manager.match_samples(sample_indexes, sample_times)
     ts = manager.get_augmented_ancestors_tree_sequence(sample_indexes)
+    if record_provenance:
+        tables = ts.dump_tables()
+        record = provenance.get_provenance_dict(command="augment_ancestors")
+        tables.provenances.add_row(record=json.dumps(record))
+        ts = tables.tree_sequence()
     return ts
 
 
@@ -549,6 +577,7 @@ def match_samples(
     extended_checks=False,
     engine=constants.C_ENGINE,
     progress_monitor=None,
+    record_provenance=True,
 ):
     """
     match_samples(sample_data, ancestors_ts, *, recombination_rate=None,\
@@ -634,6 +663,12 @@ def match_samples(
     ts = manager.finalise(
         simplify=simplify, stabilise_node_ordering=stabilise_node_ordering
     )
+    if record_provenance:
+        tables = ts.dump_tables()
+        # We don't have a source here because tree sequence files don't have a UUID yet.
+        record = provenance.get_provenance_dict(command="match-samples")
+        tables.provenances.add_row(record=json.dumps(record))
+        ts = tables.tree_sequence()
     return ts
 
 
@@ -1454,12 +1489,6 @@ class AncestorMatcher(Matcher):
         tables.build_index()
         tables.compute_mutation_parents()
         logger.debug("Sorting ancestors tree sequence done")
-        for timestamp, record in self.ancestor_data.provenances():
-            tables.provenances.add_row(timestamp=timestamp, record=json.dumps(record))
-        record = provenance.get_provenance_dict(
-            command="match_ancestors", source={"uuid": self.ancestor_data.uuid}
-        )
-        tables.provenances.add_row(record=json.dumps(record))
         logger.info(
             "Built ancestors tree sequence: {} nodes ({} pc ancestors); {} edges; "
             "{} sites; {} mutations".format(
@@ -1791,11 +1820,6 @@ class SampleMatcher(Matcher):
         tables.build_index()
         tables.compute_mutation_parents()
 
-        # We don't have a source here because tree sequence files don't have a
-        # UUID yet.
-        record = provenance.get_provenance_dict(command="match-samples")
-        tables.provenances.add_row(record=json.dumps(record))
-
         logger.info(
             "Built samples tree sequence: {} nodes ({} pc); {} edges; "
             "{} sites; {} mutations".format(
@@ -1869,8 +1893,6 @@ class SampleMatcher(Matcher):
         tables.mutations.clear()
         self.convert_inference_mutations(tables)
 
-        record = provenance.get_provenance_dict(command="augment_ancestors")
-        tables.provenances.add_row(record=json.dumps(record))
         logger.debug("Sorting ancestors tree sequence")
         tables.sort()
         logger.debug("Sorting ancestors tree sequence done")
