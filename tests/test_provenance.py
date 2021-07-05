@@ -68,6 +68,50 @@ class TestProvenanceValid:
         self.validate_file(ancestor_data)
 
 
+class TestIncludeProvenance:
+    """
+    Test that we can include or exclude provenances
+    """
+
+    def test_no_provenance_infer(self, small_sd_fixture):
+        ts = tsinfer.infer(small_sd_fixture, record_provenance=False)
+        assert ts.num_provenances == 0
+
+    def test_no_provenance_generate_ancestors(self, small_sd_fixture):
+        ancestors = tsinfer.generate_ancestors(
+            small_sd_fixture, record_provenance=False
+        )
+        assert ancestors.num_provenances == 0
+
+    def test_no_provenance_match_ancestors(self, small_sd_fixture):
+        ancestors = tsinfer.generate_ancestors(
+            small_sd_fixture, record_provenance=False
+        )
+        anc_ts = tsinfer.match_ancestors(small_sd_fixture, ancestors)
+        assert anc_ts.num_provenances == 0
+
+    def test_no_provenance_match_samples(self, small_sd_fixture):
+        ancestors = tsinfer.generate_ancestors(
+            small_sd_fixture, record_provenance=False
+        )
+        anc_ts = tsinfer.match_ancestors(small_sd_fixture, ancestors)
+        ts = tsinfer.match_samples(small_sd_fixture, anc_ts)
+        assert ts.num_provenances == 0
+
+    def test_provenance_infer(self, small_sd_fixture):
+        ts = tsinfer.infer(small_sd_fixture)
+        assert ts.num_provenances == 1
+        record = json.loads(ts.provenance[0].record)
+        params = record["parameters"]
+        assert params["command"] == "infer"
+        assert params["recombination_rate"] is None
+        assert params["mismatch_ratio"] is None
+        assert params["precision"] is None
+        assert params["exclude_positions"] is None
+        assert params["simplify"]
+        assert params["path_compression"]
+
+
 class TestGetProvenance:
     """
     Check the get_provenance_dict function.

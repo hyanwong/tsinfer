@@ -317,8 +317,31 @@ def infer(
     )
     if record_provenance:
         tables = inferred_ts.dump_tables()
-        record = provenance.get_provenance_dict(command="infer")
-        tables.provenances.add_row(record=json.dumps(record))
+        # TODO replace with a version of https://github.com/tskit-dev/tskit/pull/243
+        # TODO also make sure we convert all the arguments so that they are
+        # definitely JSON encodable.
+        if Matcher.is_ratemap(recombination_rate):
+            # TODO - we don't record the actual RateMap values, but these could be big
+            recombination_rate_param = "RateMap"
+        else:
+            recombination_rate_param = recombination_rate
+        try:
+            exclude_positions_param = exclude_positions.tolist()
+        except AttributeError:
+            exclude_positions_param = exclude_positions
+        parameters = {
+            "command": "infer",
+            "recombination_rate": recombination_rate_param,
+            "mismatch_ratio": mismatch_ratio,
+            "precision": "precision",
+            "simplify": simplify,
+            "path_compression": path_compression,
+            "exclude_positions": exclude_positions_param,
+            "TODO": "add all extra parameters",
+        }
+        tables.provenances.add_row(
+            record=json.dumps(provenance.get_provenance_dict(parameters))
+        )
         inferred_ts = tables.tree_sequence()
     return inferred_ts
 
@@ -1186,14 +1209,18 @@ class Matcher:
         ]
 
     @staticmethod
+    def is_ratemap(rho):
+        return hasattr(rho, "get_cumulative_mass")
+
+    @staticmethod
     def recombination_rate_to_dist(rho, positions):
         """
         Return the mean number of recombinations between adjacent positions (i.e.
         the genetic distance in Morgans) given either a fixed rate or a RateMap
         """
-        try:
+        if Matcher.is_ratemap(rho):
             return np.diff(rho.get_cumulative_mass(positions))
-        except AttributeError:
+        else:
             return np.diff(positions) * rho
 
     @staticmethod
@@ -1698,6 +1725,7 @@ class SampleMatcher(Matcher):
                 filter_populations=False,
                 filter_individuals=False,
                 keep_unary=True,
+                record_provenance=False,
             )
             logger.info(
                 "Finished simplify; now have {} nodes and {} edges".format(
