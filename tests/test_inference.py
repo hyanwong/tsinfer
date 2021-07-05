@@ -786,9 +786,11 @@ def random_string(rng, max_len=10):
 
 def get_multichar_alleles_example(sample_size):
     """
-    Returns an example dataset with multichar alleles.
+    Returns an example dataset with multichar alleles and a list of alleles
     """
-    ts = msprime.simulate(10, mutation_rate=10, recombination_rate=1, random_seed=5)
+    ts = msprime.simulate(
+        sample_size, mutation_rate=10, recombination_rate=1, random_seed=5
+    )
     assert ts.num_sites > 2
     sample_data = tsinfer.SampleData(sequence_length=1)
     rng = random.Random(32)
@@ -802,7 +804,7 @@ def get_multichar_alleles_example(sample_size):
         sample_data.add_site(variant.site.position, variant.genotypes, alleles)
         all_alleles.append(alleles)
     sample_data.finalise()
-    return sample_data
+    return all_alleles, sample_data
 
 
 class TestMetadataRoundTrip:
@@ -811,20 +813,7 @@ class TestMetadataRoundTrip:
     """
 
     def test_multichar_alleles(self):
-        ts = msprime.simulate(10, mutation_rate=10, recombination_rate=1, random_seed=5)
-        assert ts.num_sites > 2
-        sample_data = tsinfer.SampleData(sequence_length=1)
-        rng = random.Random(32)
-        all_alleles = []
-        for variant in ts.variants():
-            ancestral = random_string(rng)
-            derived = ancestral
-            while derived == ancestral:
-                derived = random_string(rng)
-            alleles = ancestral, derived
-            sample_data.add_site(variant.site.position, variant.genotypes, alleles)
-            all_alleles.append(alleles)
-        sample_data.finalise()
+        all_alleles, sample_data = get_multichar_alleles_example(10)
 
         for j, alleles in enumerate(sample_data.sites_alleles[:]):
             assert all_alleles[j] == tuple(alleles)
@@ -1611,7 +1600,7 @@ class TestAncestorsTreeSequence:
         self.verify(sample_data, mismatch_ratio=0.01, recombination_rate=1e-3)
 
     def test_multi_char_alleles(self):
-        sample_data = get_multichar_alleles_example(10)
+        _, sample_data = get_multichar_alleles_example(10)
         self.verify(sample_data)
         self.verify(sample_data, mismatch_ratio=100, recombination_rate=1e-9)
         self.verify(sample_data, mismatch_ratio=0.01, recombination_rate=1e-3)
