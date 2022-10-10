@@ -98,12 +98,7 @@ def setup_logging(args):
 
 
 def summarise_tree_sequence(path, ts):
-    print("path      =", path)
-    print("size      =", humanize.naturalsize(os.path.getsize(path), binary=True))
-    print("edges     =", ts.num_edges)
-    print("trees     =", ts.num_trees)
-    print("sites     =", ts.num_sites)
-    print("mutations =", ts.num_mutations)
+    print(ts)
     # TODO Add optional tree statistics like mean degree, etc.
 
 
