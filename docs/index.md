@@ -15,6 +15,9 @@ available for learning about {program}`tskit` and {program}`tsinfer`:
   way to do Y". Please make questions as clear as possible, and be respectful,
   helpful, and kind.
 
+- Development happens in our [GitHub repository](https://github.com/tskit-dev/tsinfer)
+  where you can report bugs or raise other development issues.
+
 ```{important}
 If you use {program}`tsinfer` in your work, please remember to
 cite it appropriately: see the {ref}`citations<sec_citation>` page
