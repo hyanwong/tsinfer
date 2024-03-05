@@ -431,7 +431,7 @@ ancestor_builder_compute_ancestral_states(const ancestor_builder_t *self, int di
      * ancestor_builder_compute_between_focal_sites */
     assert(sample_set_size > 0);
     memset(disagree, 0, self->num_samples * sizeof(*disagree));
-    min_sample_set_size = sample_set_size / 2;
+    min_sample_set_size = 0;
 
     /* printf("site=%d, direction=%d min_sample_size=%d\n", (int) focal_site, direction,
      */
@@ -463,7 +463,9 @@ ancestor_builder_compute_ancestral_states(const ancestor_builder_t *self, int di
                 }
             }
             if (ones + zeros == 0) {
-                ancestor[l] = TSK_MISSING_DATA;
+                if (sample_set_size > min_sample_set_size) {
+                    ancestor[l] = TSK_MISSING_DATA;
+                }
             } else {
                 if (ones >= zeros) {
                     consensus = 1;
@@ -501,10 +503,6 @@ ancestor_builder_compute_ancestral_states(const ancestor_builder_t *self, int di
                     }
                 }
                 sample_set_size = tmp_size;
-                if (sample_set_size <= min_sample_set_size) {
-                    /* printf("BREAK\n"); */
-                    break;
-                }
             }
         }
     }
