@@ -172,11 +172,12 @@ out:
 
 static int
 matcher_indexes_copy_mutation_data(matcher_indexes_t *self,
-    const tsk_table_collection_t *tables, const tsk_size_t *num_alleles)
+    const tsk_table_collection_t *tables, const tsk_size_t *num_alleles,
+    const allele_t *mutations_derived_state)
 {
     int ret = 0;
     tsk_size_t j;
-    tsk_id_t site, last_site;
+    tsk_id_t site;
     const double *restrict sites_position = tables->sites.position;
     const tsk_id_t *restrict mutations_site = tables->mutations.site;
     const tsk_id_t *restrict mutations_node = tables->mutations.node;
@@ -184,29 +185,21 @@ matcher_indexes_copy_mutation_data(matcher_indexes_t *self,
     coordinate_t *restrict converted_position = self->sites.position;
 
     for (j = 0; j < self->num_sites; j++) {
-        /* TODO check for under/overflow */
         converted_position[j] = (coordinate_t) sites_position[j];
         self->sites.mutations[j] = NULL;
         self->sites.num_alleles[j] = num_alleles != NULL ? num_alleles[j] : 2;
     }
     converted_position[j] = (coordinate_t) tables->sequence_length;
 
-    last_site = -1;
     for (j = 0; j < total_mutations; j++) {
         site = mutations_site[j];
-        if (site == last_site) {
-            ret = TSI_ERR_MULTIPLE_MUTATIONS_AT_SITE;
-            goto out;
-        }
-
-        self->sites.mutations[site] = NULL;
-        ret = matcher_indexes_add_mutation(self, site, mutations_node[j], 1);
+        allele_t derived_state
+            = mutations_derived_state != NULL ? mutations_derived_state[j] : 1;
+        ret = matcher_indexes_add_mutation(self, site, mutations_node[j], derived_state);
         if (ret != 0) {
             goto out;
         }
-        last_site = site;
     }
-
 out:
     return ret;
 }
@@ -252,7 +245,8 @@ matcher_indexes_validate_tables(
 
 int
 matcher_indexes_alloc(matcher_indexes_t *self, const tsk_table_collection_t *tables,
-    const tsk_size_t *num_alleles, tsk_flags_t flags)
+    const tsk_size_t *num_alleles, const allele_t *mutations_derived_state,
+    tsk_flags_t flags)
 {
     int ret = 0;
 
@@ -290,7 +284,8 @@ matcher_indexes_alloc(matcher_indexes_t *self, const tsk_table_collection_t *tab
     if (ret != 0) {
         goto out;
     }
-    ret = matcher_indexes_copy_mutation_data(self, tables, num_alleles);
+    ret = matcher_indexes_copy_mutation_data(
+        self, tables, num_alleles, mutations_derived_state);
     if (ret != 0) {
         goto out;
     }

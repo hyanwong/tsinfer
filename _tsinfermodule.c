@@ -7,6 +7,7 @@
 #include <structmember.h>
 #include <float.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "lib/tsinfer.h"
 
@@ -428,6 +429,9 @@ MatcherIndexes_init(MatcherIndexes *self, PyObject *args, PyObject *kwds)
     PyObject *num_alleles_obj = NULL;
     PyArrayObject *num_alleles_array = NULL;
     tsk_size_t *num_alleles_data = NULL;
+    allele_t *mutation_derived_state_data = NULL;
+    tsk_size_t num_mutations;
+    tsk_size_t j;
     static char *kwlist[] = { "tables", "num_alleles", NULL };
 
     self->matcher_indexes = NULL;
@@ -446,20 +450,61 @@ MatcherIndexes_init(MatcherIndexes *self, PyObject *args, PyObject *kwds)
         }
         num_alleles_data = PyArray_DATA(num_alleles_array);
     }
+    /*
+     * Build per-mutation allele states.
+     *
+     * For now we only distinguish ancestral (0) from derived (1),
+     * which is sufficient for biallelic sites with multiple mutations.
+     */
+    num_mutations = tables->tables->mutations.num_rows;
+
+    if (num_mutations > 0) {
+        const tsk_site_table_t *sites = &tables->tables->sites;
+        const tsk_mutation_table_t *mutations = &tables->tables->mutations;
+
+        mutation_derived_state_data
+            = PyMem_Malloc(num_mutations * sizeof(*mutation_derived_state_data));
+        if (mutation_derived_state_data == NULL) {
+            PyErr_NoMemory();
+            goto out;
+        }
+
+        for (j = 0; j < num_mutations; j++) {
+            tsk_id_t site = mutations->site[j];
+
+            const char *ancestral
+                = sites->ancestral_state + sites->ancestral_state_offset[site];
+            tsk_size_t ancestral_len = sites->ancestral_state_offset[site + 1]
+                                       - sites->ancestral_state_offset[site];
+
+            const char *derived
+                = mutations->derived_state + mutations->derived_state_offset[j];
+            tsk_size_t derived_len = mutations->derived_state_offset[j + 1]
+                                     - mutations->derived_state_offset[j];
+
+            if (ancestral_len == derived_len
+                && memcmp(ancestral, derived, ancestral_len) == 0) {
+                mutation_derived_state_data[j] = (allele_t) 0;
+            } else {
+                mutation_derived_state_data[j] = (allele_t) 1;
+            }
+        }
+    }
 
     self->matcher_indexes = PyMem_Calloc(1, sizeof(*self->matcher_indexes));
     if (self->matcher_indexes == NULL) {
         PyErr_NoMemory();
         goto out;
     }
-    err = matcher_indexes_alloc(
-        self->matcher_indexes, tables->tables, num_alleles_data, 0);
+    err = matcher_indexes_alloc(self->matcher_indexes, tables->tables, num_alleles_data,
+        mutation_derived_state_data, 0);
     if (err != 0) {
         handle_library_error(err);
         goto out;
     }
     ret = 0;
 out:
+    PyMem_Free(mutation_derived_state_data);
     Py_XDECREF(num_alleles_array);
     return ret;
 }

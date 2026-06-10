@@ -434,7 +434,7 @@ test_matcher_indexes_errors(void)
     ret = tsk_table_collection_build_index(&tables, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
-    ret = matcher_indexes_alloc(&mi, &tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, &tables, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, TSI_ERR_MULTIPLE_MUTATIONS_AT_SITE);
     matcher_indexes_free(&mi);
 
@@ -476,7 +476,7 @@ test_matcher_indexes_edge_node_out_of_bounds(void)
     /* Overwrite child of second edge to out-of-bounds value */
     tables.edges.child[1] = 5;
 
-    ret = matcher_indexes_alloc(&mi, &tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, &tables, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, TSI_ERR_BAD_EDGE_NODE);
     matcher_indexes_free(&mi);
     tsk_table_collection_free(&tables);
@@ -506,7 +506,7 @@ test_matcher_indexes_edge_node_out_of_bounds(void)
     /* Overwrite parent of second edge to out-of-bounds value */
     tables.edges.parent[1] = 10;
 
-    ret = matcher_indexes_alloc(&mi, &tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, &tables, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, TSI_ERR_BAD_EDGE_NODE);
     matcher_indexes_free(&mi);
     tsk_table_collection_free(&tables);
@@ -543,7 +543,7 @@ test_matcher_indexes_mutation_node_out_of_bounds(void)
     /* Overwrite mutation node to out-of-bounds value */
     tables.mutations.node[0] = 99;
 
-    ret = matcher_indexes_alloc(&mi, &tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, &tables, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, TSI_ERR_BAD_MUTATION_NODE);
     matcher_indexes_free(&mi);
     tsk_table_collection_free(&tables);
@@ -580,7 +580,7 @@ test_matcher_indexes_mutation_site_out_of_bounds(void)
     /* Overwrite site ID after sort/index to bypass tskit's checks */
     tables.mutations.site[0] = 5;
 
-    ret = matcher_indexes_alloc(&mi, &tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, &tables, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, TSI_ERR_BAD_MUTATION_SITE);
     matcher_indexes_free(&mi);
     tsk_table_collection_free(&tables);
@@ -616,7 +616,7 @@ test_matcher_indexes_node_0_not_root(void)
     ret = tsk_table_collection_build_index(&tables, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
-    ret = matcher_indexes_alloc(&mi, &tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, &tables, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, TSI_ERR_NODE_0_NOT_ROOT);
     matcher_indexes_free(&mi);
     tsk_table_collection_free(&tables);
@@ -657,7 +657,7 @@ test_matcher_indexes_node_0_is_child(void)
     /* Overwrite child of first edge to make node 0 a child */
     tables.edges.child[0] = 0;
 
-    ret = matcher_indexes_alloc(&mi, &tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, &tables, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, TSI_ERR_NODE_0_NOT_ROOT);
     matcher_indexes_free(&mi);
     tsk_table_collection_free(&tables);
@@ -694,7 +694,7 @@ test_matcher_indexes_node_0_disconnected(void)
     ret = tsk_table_collection_build_index(&tables, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
-    ret = matcher_indexes_alloc(&mi, &tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, &tables, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, TSI_ERR_NODE_0_NOT_ROOT);
     matcher_indexes_free(&mi);
     tsk_table_collection_free(&tables);
